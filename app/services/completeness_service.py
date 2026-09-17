@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any, Iterable
+
+from app.domain.enums import AcquisitionType, EventType, FieldStatus, TokenPositionStatus
+from app.domain.formatters import format_duration_zh, format_hms_unbounded, safe_export_value
+from app.domain.models import AuditedValue, TokenAnalysisResult, TradeRecord, WarningRecord
+from app.utils.money import to_decimal
+from app.utils.time_utils import format_datetime, now_ts
+
+
+def assert_no_empty_export_cells(rows: Iterable[dict[str, Any]]) -> None:
+    for index, row in enumerate(rows, start=1):
+        for key, value in row.items():
+            if value is None:
+                raise AssertionError(f"row {index} field {key} is None")
+            if isinstance(value, str) and value.strip() == "":
+                raise AssertionError(f"row {index} field {key} is empty")
+            if isinstance(value, float) and value != value:
+                raise AssertionError(f"row {index} field {key} is NaN")
+
+
+def _audited_or_missing(value: AuditedValue, kind: str) -> str:
+    exported = value.export(kind)
+    if exported is None or exported == "":
+        return "GMGN 未提供"
+    return str(exported)
+
+
+class CompletenessService:
+    def token_export_row(self, token: TokenAnalysisResult) -> dict[str, Any]:
+        acq = token.acquisition
+        first_buy = token.first_buy_display.export("usd_compact")
+        if acq.acquisition_type != AcquisitionType.BUY:
+            first_buy = safe_export_value(None, FieldStatus.NOT_APPLICABLE, reason="不适用（转入获得）")
+        buy_time = token.first_buy_time.export("datetime")
+        created = token.created_at.export("datetime")
+        time_diff = token.time_diff_seconds
+        time_diff_seconds = time_diff.export("int") if time_diff.status == FieldStatus.KNOWN else time_diff.export("text")
+        time_diff_text = (
+            format_duration_zh(int(time_diff.value))
+            if time_diff.status == FieldStatus.KNOWN and time_diff.value is not None
+            else time_diff.export("text")
+        )
+        if acq.acquisition_type != AcquisitionType.BUY and time_diff.status == FieldStatus.KNOWN:
+            time_diff_text = f"{time_diff_text}（转入时间差）"
+        holding = token.holding_duration_seconds
+        holding_text = (
+            format_duration_zh(int(holding.value))
+            if holding.status == FieldStatus.KNOWN and holding.value is not None
+            else holding.export("text")
+        )
+        buy_total = safe_export_value(token.buy_total_usd, FieldStatus.KNOWN if token.buy_total_usd is not None else FieldStatus.API_MISSING, kind="usd")
+        sell_total = safe_export_value(token.sell_total_usd, FieldStatus.KNOWN if token.sell_total_usd is not None else FieldStatus.API_MISSING, kind="usd")
+        row = {
+            "#": 0,
+            "币种": (token.symbol or "").strip() or "未知",
+            "代币名称": (token.name or token.symbol or "").strip() or "未知",
+            "代币合约": token.token_address or "未知地址",
+            "来源平台": _audited_or_missing(token.source_platform, "text"),
+            "获得方式": acq.acquisition_type.value,
+            "获得状态": acq.status.value,
+            "入场市值": token.market_cap.export("usd_compact"),
+            "首笔买入": first_buy,
+            "首买数量": token.first_buy_amount.export("amount"),
+            "买入时间": buy_time,
+            "创建时间": created,
+            "开盘时间": token.open_at.export("datetime"),
+            "池子创建时间": token.pool_created_at.export("datetime"),
+            "时差": str(time_diff_text),
+            "时差HMS": format_hms_unbounded(int(time_diff.value)) if time_diff.status == FieldStatus.KNOWN and time_diff.value is not None else "无法计算",
+            "时差秒数": time_diff_seconds,
+            "持仓时长": holding_text,
+            "持仓时长秒数": holding.export("int") if holding.status == FieldStatus.KNOWN else holding.export("text"),
+            "买入笔数": token.buy_count,
+            "买入总额": buy_total,
+            "卖出笔数": token.sell_count,
+            "卖出总额": sell_total,
+            "已实现盈亏": token.realized_profit.export("usd"),
+            "未实现盈亏": token.unrealized_profit.export("usd"),
+            "总盈亏": token.total_profit.export("usd"),
+            "总盈亏%": token.total_profit_pnl.export("percent"),
+            "本地FIFO已实现": token.fifo_realized_profit.export("usd"),
+            "当前余额": safe_export_value(token.current_balance, FieldStatus.KNOWN if token.current_balance is not None else FieldStatus.UNKNOWN, kind="amount", reason="活动推算余额"),
+            "活动推算余额": safe_export_value(
+                token.calculated_balance if token.calculated_balance is not None else token.current_balance,
+                FieldStatus.KNOWN if (token.calculated_balance is not None or token.current_balance is not None) else FieldStatus.UNKNOWN,
+                kind="amount",
+                reason="活动推算余额",
+            ),
+            "余额口径": token.balance_authority or "DERIVED_FROM_ACTIVITY",
+            "缺失成本": token.missing_cost_count,
+            "缺失成本卖出笔数": token.missing_cost_sell_count or token.missing_cost_count,
+            "缺失成本数量": safe_export_value(token.missing_cost_token_amount, FieldStatus.KNOWN if token.missing_cost_token_amount is not None else FieldStatus.NOT_APPLICABLE, kind="amount", reason="无缺失数量"),
+            "Launchpad": _audited_or_missing(token.launchpad_platform, "text"),
+            "资产来源": _audited_or_missing(token.asset_source, "text"),
+            "流动性平台": _audited_or_missing(token.liquidity_platform, "text"),
+            "持仓状态": token.position_status.value,
+            "状态": token.status.value,
+            "钱包": token.wallet_address,
+            "警告": "；".join(token.warnings) if token.warnings else "无",
+        }
+        assert_no_empty_export_cells([row])
+        return row
+
+    def trade_export_row(self, trade: TradeRecord, platform: str) -> dict[str, Any]:
+        if trade.event_type == EventType.BUY:
+            pnl = "未实现"
+        elif trade.event_type == EventType.SELL:
+            pnl = trade.single_pnl_display or "无法验证历史成本"
+        elif trade.event_type == EventType.TRANSFER_IN:
+            pnl = "不适用（转入）"
+        elif trade.event_type == EventType.TRANSFER_OUT:
+            pnl = "不适用（转出）"
+        else:
+            pnl = "未实现"
+        row = {
+            "时间": format_datetime(trade.timestamp) if trade.timestamp else "GMGN 未提供",
+            "类型": trade.event_type.value,
+            "币种": trade.token_symbol or "未知",
+            "代币合约": trade.token_address or "未知地址",
+            "数量": safe_export_value(trade.token_amount, trade.amount_status, kind="amount"),
+            "USD金额": safe_export_value(trade.cost_usd, trade.cost_usd_status, kind="usd"),
+            "SOL金额": safe_export_value(
+                trade.cost_sol,
+                FieldStatus.ESTIMATED if trade.cost_sol_estimated else trade.cost_sol_status,
+                estimated=trade.cost_sol_estimated,
+                kind="amount",
+            ),
+            "价格USD": safe_export_value(trade.price_usd, FieldStatus.KNOWN if trade.price_usd is not None else FieldStatus.API_MISSING, kind="usd"),
+            "Gas USD": safe_export_value(trade.gas_usd, trade.gas_usd_status, kind="usd"),
+            "Gas SOL": safe_export_value(trade.gas_sol, trade.gas_sol_status, kind="amount"),
+            "单笔盈亏": pnl,
+            "来源平台": platform or "未知来源",
+            "钱包": trade.wallet_address,
+            "TxHash": trade.tx_hash or "未知哈希",
+            "是否报告范围": "是" if trade.in_report_range else "否（历史追溯）",
+        }
+        assert_no_empty_export_cells([row])
+        return row
+
+    def collect_warnings(self, token: TokenAnalysisResult) -> list[WarningRecord]:
+        records: list[WarningRecord] = []
+        fields = [
+            ("来源平台", token.source_platform),
+            ("创建时间", token.created_at),
+            ("入场市值", token.market_cap),
+            ("首笔买入", token.first_buy_display),
+            ("买入时间", token.first_buy_time),
+            ("时差", token.time_diff_seconds),
+            ("已实现盈亏", token.realized_profit),
+            ("总盈亏%", token.total_profit_pnl),
+        ]
+        for name, audited in fields:
+            if audited.status != FieldStatus.KNOWN or audited.estimated:
+                records.append(
+                    WarningRecord(
+                        wallet_address=token.wallet_address,
+                        token_address=token.token_address,
+                        token_symbol=token.symbol,
+                        field_name=name,
+                        final_value=str(audited.export("text")),
+                        status=audited.status.value,
+                        reason=audited.reason or token.acquisition.reason or "见数据来源",
+                        source=audited.source,
+                        estimated=audited.estimated,
+                    )
+                )
+        if token.acquisition.acquisition_type != AcquisitionType.BUY:
+            records.append(
+                WarningRecord(
+                    wallet_address=token.wallet_address,
+                    token_address=token.token_address,
+                    token_symbol=token.symbol,
+                    field_name="首笔买入",
+                    final_value="不适用（转入获得）" if token.acquisition.acquisition_type == AcquisitionType.TRANSFER_IN else token.acquisition.acquisition_type.value,
+                    status=token.acquisition.status.value,
+                    reason=token.acquisition.reason,
+                    source=token.acquisition.source,
+                    estimated=False,
+                )
+            )
+        if token.missing_cost_count:
+            records.append(
+                WarningRecord(
+                    wallet_address=token.wallet_address,
+                    token_address=token.token_address,
+                    token_symbol=token.symbol,
+                    field_name="缺失成本",
+                    final_value=str(token.missing_cost_count),
+                    status="UNKNOWN",
+                    reason="Sell 数量超过可验证 Buy 成本",
+                    source="local_fifo",
+                    estimated=False,
+                )
+            )
+        return records
+
+    def apply_time_fields(self, token: TokenAnalysisResult, last_sell_ts: int | None) -> None:
+        created = token.created_at.value if token.created_at.status == FieldStatus.KNOWN else None
+        acq_ts = token.acquisition.timestamp
+        if acq_ts and created:
+            token.time_diff_seconds = AuditedValue(
+                acq_ts - int(created),
+                "first_acquisition - token_created_at",
+                FieldStatus.KNOWN,
+                reason="转入时间差" if token.acquisition.acquisition_type != AcquisitionType.BUY else "",
+            )
+        elif not created:
+            token.time_diff_seconds = AuditedValue(None, "token_info.creation_timestamp", FieldStatus.API_MISSING, reason="GMGN 未提供创建时间，无法计算时差")
+        else:
+            token.time_diff_seconds = AuditedValue(None, "wallet_activity", FieldStatus.UNKNOWN, reason="无首次获得时间，无法计算时差")
+
+        if not acq_ts:
+            token.holding_duration_seconds = AuditedValue(None, "wallet_activity", FieldStatus.UNKNOWN, reason="无首次获得时间")
+            return
+        if token.position_status == TokenPositionStatus.CLOSED and last_sell_ts:
+            seconds = last_sell_ts - acq_ts
+            source = "last_sell - first_acquisition"
+        else:
+            seconds = now_ts() - acq_ts
+            source = "now - first_acquisition"
+        token.holding_duration_seconds = AuditedValue(seconds, source, FieldStatus.KNOWN)

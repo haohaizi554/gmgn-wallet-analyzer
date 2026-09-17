@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "data": {
+    "activities": [
+      {
+        "event_type": "sell",
+        "tx_hash": "sell1",
+        "timestamp": 1757800000,
+        "token_amount": "100",
+        "price_usd": "2",
+        "cost_usd": "200",
+        "gas_usd": "0.1",
+        "token": {"address": "TokenAAA", "symbol": "AAA", "name": "Alpha", "total_supply": "1000000"}
+      }
+    ],
+    "next": null
+  }
+}

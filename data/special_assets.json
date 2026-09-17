@@ -1,0 +1,39 @@
+{
+  "assets": [
+    {
+      "mint": "So11111111111111111111111111111111111111112",
+      "type": "WRAPPED",
+      "source": "Native wrap",
+      "display": "WSOL",
+      "reason": "Solana 原生包装资产 WSOL"
+    },
+    {
+      "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "type": "UNKNOWN",
+      "source": "Circle",
+      "display": "USDC",
+      "reason": "Circle 官方稳定币，非 Launchpad SPL"
+    },
+    {
+      "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+      "type": "UNKNOWN",
+      "source": "Tether",
+      "display": "USDT",
+      "reason": "Tether 官方稳定币，非 Launchpad SPL"
+    },
+    {
+      "mint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+      "type": "BRIDGE",
+      "source": "Coinbase",
+      "display": "cbBTC",
+      "reason": "Coinbase Wrapped BTC"
+    },
+    {
+      "mint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
+      "type": "BRIDGE",
+      "source": "Wormhole",
+      "display": "WBTC",
+      "reason": "Wormhole 桥接 WBTC"
+    }
+  ]
+}
