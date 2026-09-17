@@ -782,11 +782,69 @@ class PublicMarketFallbackTests(unittest.TestCase):
                 "mint": "MintCCC",
                 "symbol": "CCC",
                 "usd_market_cap": "12345.6",
+                "total_supply": 1000000000000000,
+                "decimals": 6,
                 "created_timestamp": 1722470400000,
             }
         )
         self.assertEqual(pump.market_cap, Decimal("12345.6"))
         self.assertEqual(pump.pair_created_at, 1722470400)
+        self.assertEqual(pump.price_usd, Decimal("12345.6") / Decimal("1000000000"))
+
+    def test_jupiter_price_v3_and_defillama_parsers(self):
+        from app.providers.jupiter.client import parse_price_v3
+        from app.providers.defillama.client import parse_coin as parse_llama
+        from app.providers.raydium.client import RaydiumProvider
+
+        quote = parse_price_v3(
+            "MintDDD",
+            {"usdPrice": "0.0000043", "liquidity": "100", "createdAt": "2026-09-16T13:10:15Z"},
+        )
+        self.assertEqual(quote.price_usd, Decimal("0.0000043"))
+        llama = parse_llama("MintEEE", {"price": 1.25, "symbol": "EEE"})
+        self.assertEqual(llama.price_usd, Decimal("1.25"))
+        self.assertEqual(llama.symbol, "EEE")
+        ray = RaydiumProvider()
+        self.assertEqual(ray.name, "raydium")
+
+    def test_gecko_multi_404_falls_back_to_single(self):
+        from app.providers.exceptions import ProviderError
+        from app.providers.geckoterminal.client import GeckoTerminalProvider
+
+        gecko = GeckoTerminalProvider()
+
+        def fake_http(method, url, **kwargs):
+            if "/tokens/multi/" in url:
+                raise ProviderError("HTTP 404", provider="geckoterminal", status=404)
+            if "/tokens/MintFFF" in url and "/pools" not in url:
+                return {
+                    "data": {
+                        "id": "solana_MintFFF",
+                        "attributes": {"address": "MintFFF", "symbol": "FFF", "price_usd": "0.4", "market_cap_usd": "4000"},
+                    }
+                }
+            raise ProviderError("HTTP 404", provider="geckoterminal", status=404)
+
+        gecko.http_request = fake_http
+        quotes = gecko.get_token_quotes(["MintFFF"])
+        self.assertEqual(quotes[0].price_usd, Decimal("0.4"))
+
+    def test_transfer_mark_usd_and_fifo_cost(self):
+        from app.domain.enums import EventType
+        from app.domain.models import TradeRecord
+        from app.resolvers.historical_price import fill_trade_mark_usd
+        from app.services.pnl_service import apply_fifo
+
+        transfer = TradeRecord(
+            "W", "sol", "M", "S", "S", "in1", 1, EventType.TRANSFER_IN,
+            Decimal("10"), None, None, None, None, Decimal("0.0001"), None, {},
+        )
+        fill_trade_mark_usd(transfer, Decimal("2"), Decimal("200"))
+        self.assertEqual(transfer.cost_usd, Decimal("20"))
+        self.assertEqual(transfer.gas_usd, Decimal("0.02"))
+        result = apply_fifo([transfer])
+        self.assertEqual(result.remaining_cost_usd, Decimal("20"))
+        self.assertEqual(result.realized_profit, Decimal("0"))
 
 
 if __name__ == "__main__":

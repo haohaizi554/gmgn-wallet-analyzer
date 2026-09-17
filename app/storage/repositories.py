@@ -452,6 +452,14 @@ class Repositories:
             return
         self.db.execute("DELETE FROM wallet_reports WHERE id=?", (report_id,))
 
+    def clear_history(self) -> None:
+        self.db.execute("DELETE FROM wallet_reports")
+        self.db.execute("DELETE FROM wallet_tasks")
+        self.db.execute("DELETE FROM analysis_jobs")
+        self.db.execute("DELETE FROM jobs")
+        self.db.execute("DELETE FROM analysis_results")
+        self.db.execute("DELETE FROM task_runs")
+
     def get_provider_cache(self, key: str) -> Optional[Any]:
         import json
 

@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from app.domain.models import WalletReport
 from app.services.completeness_service import CompletenessService, assert_no_empty_export_cells
 from app.utils.paths import OUTPUT_DIR, REPORT_DIR, ensure_runtime_dirs
+from app.utils.text import excel_cell
 from app.utils.time_utils import format_datetime
 from app.utils.validators import short_address
 from app.version import __version__
@@ -137,7 +138,6 @@ class ExportService:
                 ("代币分析", token_rows),
                 ("交易明细", trade_rows or [self._empty_trade_placeholder(report.request.wallet_address)]),
                 ("异常与补全", warning_rows),
-                ("采集范围", scope_rows),
                 ("原始概要", raw_rows),
                 ("数据验证", audit_rows),
                 ("冲突与缺失", conflict_rows),
@@ -266,12 +266,9 @@ class ExportService:
         self._write_workbook(
             xlsx,
             [
-                ("钱包汇总", summary_rows or [{"钱包": "无", "状态": "无报告", "Token数": 0, "买入": 0, "卖出": 0, "特殊获得": 0, "缺失成本": 0, "耗时秒": 0, "Excel": "无", "请求数": 0, "缓存命中率": "0%"}]),
                 ("代币分析", token_rows or [{"#": 0, "币种": "无", "代币名称": "无", "代币合约": "无", "来源平台": "无", "钱包": reports[0].request.wallet_address if reports else "无"}]),
                 ("交易明细", trade_rows or [self._empty_trade_placeholder(reports[0].request.wallet_address if reports else "无")]),
                 ("异常补全", warning_rows),
-                ("采集范围", scope_rows or [{"钱包": "无", "链": "sol", "报告周期": "无", "开始时间": "无", "结束时间": "无", "实际最早交易": "无交易", "实际最晚交易": "无交易", "报告交易数": 0, "历史追溯交易数": 0, "API页数": 0, "Token数量": 0, "是否被上限截断": "否", "生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "版本": __version__, "Excel路径": str(xlsx), "JSON路径": "无", "主历史数据源": "无", "Fallback数据源": "无", "请求开始": "无", "请求结束": "无", "实际覆盖开始": "无", "实际覆盖结束": "无", "Coverage Complete": "否", "Verified Empty": "否", "History Pages": 0, "History Transactions": 0, "Fallback Used": "否"}]),
-                ("API性能", perf_rows or [{"钱包": "无", "请求数": 0, "缓存命中": 0, "缓存未命中": 0, "缓存命中率": "0%", "429重试": 0, "错误数": 0, "耗时秒": 0, "Job ID": job_id, "任务状态": "无"}]),
                 ("数据源统计", self._batch_provider_rows(reports)),
             ],
             hide_suffix={"代币分析": 11},
@@ -313,7 +310,7 @@ class ExportService:
                 cell.font = HEADER_FONT
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             for row in rows:
-                values = [row.get(h, "GMGN 未提供") for h in headers]
+                values = [excel_cell(row.get(h, "GMGN 未提供")) for h in headers]
                 ws.append(values)
                 excel_row = ws.max_row
                 for col, header in enumerate(headers, start=1):
@@ -322,11 +319,12 @@ class ExportService:
                     cell.border = THIN
                     cell.alignment = Alignment(vertical="center")
                     value = cell.value
-                    if header in profit_headers and isinstance(value, str):
-                        if value.startswith("-") or "亏损" in value:
+                    text = str(value).lstrip("'") if isinstance(value, str) else value
+                    if header in profit_headers and isinstance(text, str):
+                        if text.startswith("-") or "亏损" in text:
                             cell.font = RED
-                        elif value not in {"未实现", "无法验证历史成本", "不适用（转入）", "不适用（转出）", "GMGN 未提供", "无交易"} and not value.startswith("不适用"):
-                            if any(ch.isdigit() for ch in value) and "-" not in value[:1]:
+                        elif text not in {"未实现", "无法验证历史成本", "转入", "转出", "GMGN 未提供", "无交易", "$0.0000"} and not text.startswith("不适用"):
+                            if any(ch.isdigit() for ch in text) and not text.startswith("-"):
                                 cell.font = GREEN
                     if header in {"状态", "获得方式", "获得状态"} and str(value) not in {"SUCCESS", "BUY", "VERIFIED"}:
                         if str(value) in {"WARNING", "TRANSFER_IN", "BRIDGE", "WRAPPED", "FAILED"}:

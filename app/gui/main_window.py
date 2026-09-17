@@ -12,9 +12,9 @@ from app.config import AppConfig, load_config
 from app.gui.about_page import AboutPage
 from app.gui.analysis_page import AnalysisPage
 from app.gui.components.log_panel import LogPanel
-from app.gui.export_page import ExportPage
 from app.gui.history_page import HistoryPage
 from app.gui.settings_page import SettingsPage
+from app.gui.viz_page import VizPage
 from app.gui.sidebar import Sidebar
 from app.gui.theme import BG, MUTED, PANEL, TEXT, apply_theme, font
 from app.gui.ui_scheduler import DRAIN_BUDGET, coalesce_messages
@@ -97,7 +97,7 @@ class MainWindow(ctk.CTk):
 
         self.pages["analysis"] = AnalysisPage(self.page_host, self)
         self.pages["history"] = HistoryPage(self.page_host, self)
-        self.pages["export"] = ExportPage(self.page_host, self)
+        self.pages["viz"] = VizPage(self.page_host, self)
         self.pages["settings"] = SettingsPage(self.page_host, self)
         self.pages["about"] = AboutPage(self.page_host)
         for page in self.pages.values():
@@ -124,12 +124,19 @@ class MainWindow(ctk.CTk):
             return
         same = self._active_page == key
         if not same:
+            analysis = self.pages.get("analysis")
+            if key != "analysis" and analysis is not None and getattr(analysis, "_results_fullscreen", False):
+                analysis._exit_results_fullscreen()
             page.tkraise()
             self._active_page = key
         if key == "history":
             history = self.pages.get("history")
             if history is not None:
                 history.refresh_if_dirty()
+        elif key == "viz":
+            viz = self.pages.get("viz")
+            if viz is not None:
+                viz.refresh_if_dirty()
         elif key == "analysis" and not same:
             analysis = self.pages.get("analysis")
             pending = getattr(analysis, "_pending_report", None) if analysis is not None else None
@@ -205,11 +212,15 @@ class MainWindow(ctk.CTk):
 
     def mark_history_dirty(self) -> None:
         page = self.pages.get("history")
-        if not page:
-            return
-        page.mark_dirty()
-        if self._active_page == "history":
-            page.refresh_if_dirty()
+        if page:
+            page.mark_dirty()
+            if self._active_page == "history":
+                page.refresh_if_dirty()
+        viz = self.pages.get("viz")
+        if viz:
+            viz.mark_dirty()
+            if self._active_page == "viz":
+                viz.refresh_if_dirty()
 
     def _enqueue_log(self, formatted: str, level: str) -> None:
         self.ui_queue.put({"type": "log", "text": formatted, "level": level})

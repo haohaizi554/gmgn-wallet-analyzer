@@ -271,6 +271,17 @@ class HistoryDeleteTests(unittest.TestCase):
         repos.delete_job(job_id)
         self.assertEqual(len(repos.list_jobs()), 0)
 
+    def test_clear_history_removes_jobs_and_reports(self):
+        db = _db()
+        repos = Repositories(db)
+        repos.save_job("JOB-A", ["7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV"], "single", "SUCCESS", {"token_count": 1}, "a.xlsx", 1.0)
+        repos.save_job("JOB-B", ["7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV"], "batch", "SUCCESS", {"token_count": 2}, "b.xlsx", 1.0)
+        repos.save_report("R1", "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", "sol", "7d", 0, 1, "SUCCESS", {}, "a.xlsx", "a.json", 1.0, job_id="JOB-A")
+        repos.save_report("R2", "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", "sol", "7d", 0, 1, "SUCCESS", {}, "b.xlsx", "b.json", 1.0, job_id="JOB-B")
+        repos.clear_history()
+        self.assertEqual(len(repos.list_jobs()), 0)
+        self.assertEqual(len(repos.list_reports()), 0)
+
 
 class RawJsonTests(unittest.TestCase):
     def test_100_threads_unique_files(self):
@@ -329,6 +340,9 @@ class GuiMergeTests(unittest.TestCase):
     def test_single_and_batch_same_page(self):
         labels = dict(NAV_ITEMS)
         self.assertEqual(labels.get("analysis"), "分析任务")
+        self.assertEqual(labels.get("viz"), "数据可视化")
+        self.assertNotIn("export", labels)
+        self.assertNotIn("数据导出", labels.values())
         self.assertNotIn("batch", labels)
         self.assertNotIn("任务进度", labels.values())
         one = summarize_wallet_input("7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV\n")

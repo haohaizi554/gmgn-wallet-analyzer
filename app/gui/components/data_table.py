@@ -16,13 +16,21 @@ class DataTable(ctk.CTkFrame):
         master,
         columns: list[tuple[str, str, int]],
         on_copy: Optional[Callable[[str], None]] = None,
+        allow_fullscreen: bool = True,
+        on_fullscreen: Optional[Callable[[], None]] = None,
         **kwargs,
     ):
         super().__init__(master, fg_color=PANEL, **kwargs)
         self.columns = columns
         self.on_copy = on_copy
+        self._on_fullscreen = on_fullscreen
         self._full_values: dict[str, str] = {}
         self._filter_job: str | None = None
+        self._filter_values = ["全部"]
+        self._is_fullscreen = False
+        self._fs_overlay: Optional[ctk.CTkFrame] = None
+        self._fs_peer: Optional["DataTable"] = None
+        self._fs_esc: str | None = None
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.pack(fill="x", padx=8, pady=(8, 4))
         self.search_var = tk.StringVar()
@@ -33,8 +41,22 @@ class DataTable(ctk.CTkFrame):
         entry.bind("<KeyRelease>", lambda _e: self._schedule_filter())
         self.filter_box = ctk.CTkComboBox(toolbar, variable=self.filter_var, values=["全部"], width=140, height=28, command=lambda _v: self.apply_filter())
         self.filter_box.pack(side="left", padx=8)
+        self._fs_btn: Optional[ctk.CTkButton] = None
+        if allow_fullscreen:
+            self._fs_btn = ctk.CTkButton(
+                toolbar,
+                text="全屏",
+                width=72,
+                height=28,
+                fg_color="#E5E7EB",
+                text_color=TEXT,
+                hover_color="#D1D5DB",
+                command=self._on_fullscreen or self.toggle_fullscreen,
+            )
+            self._fs_btn.pack(side="right")
         self.count_label = ctk.CTkLabel(toolbar, text="0 行", font=font(12), text_color=MUTED)
-        self.count_label.pack(side="right")
+        self.count_label.pack(side="right", padx=(0, 8) if allow_fullscreen else 0)
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
         style = ttk.Style()
         style.theme_use("clam")
@@ -67,19 +89,103 @@ class DataTable(ctk.CTkFrame):
         self._rows: list[dict[str, Any]] = []
         self._by_id: dict[str, dict[str, Any]] = {}
 
+    def toggle_fullscreen(self) -> None:
+        if self._is_fullscreen:
+            self.exit_fullscreen()
+        else:
+            self.enter_fullscreen()
+
+    def enter_fullscreen(self) -> None:
+        if self._is_fullscreen:
+            return
+        top = self.winfo_toplevel()
+        overlay = ctk.CTkFrame(top, fg_color=PANEL, corner_radius=0)
+        overlay.place(x=0, y=0, relwidth=1, relheight=1)
+        overlay.lift()
+        peer = DataTable(overlay, self.columns, on_copy=self.on_copy, allow_fullscreen=True)
+        peer.pack(fill="both", expand=True)
+        peer.set_filters(self._filter_values)
+        peer.search_var.set(self.search_var.get())
+        peer.filter_var.set(self.filter_var.get())
+        peer.set_rows(self._rows, self._full_values)
+        if peer._fs_btn is not None:
+            peer._fs_btn.configure(text="退出全屏", width=88, command=self.exit_fullscreen)
+        peer.search_var.trace_add("write", lambda *_a: self._pull_peer_state())
+        peer.filter_var.trace_add("write", lambda *_a: self._pull_peer_state())
+        self._fs_overlay = overlay
+        self._fs_peer = peer
+        self._is_fullscreen = True
+        if self._fs_btn is not None:
+            self._fs_btn.configure(text="退出全屏", width=88)
+        self._fs_esc = top.bind("<Escape>", self._on_fs_escape, add="+")
+
+    def set_fullscreen_active(self, active: bool) -> None:
+        if self._fs_btn is None:
+            return
+        self._fs_btn.configure(text="退出全屏" if active else "全屏", width=88 if active else 72)
+
+    def exit_fullscreen(self) -> None:
+        if not self._is_fullscreen:
+            return
+        self._pull_peer_state()
+        top = self.winfo_toplevel()
+        if self._fs_esc:
+            try:
+                top.unbind("<Escape>", self._fs_esc)
+            except tk.TclError:
+                pass
+            self._fs_esc = None
+        overlay = self._fs_overlay
+        self._fs_overlay = None
+        self._fs_peer = None
+        if overlay is not None:
+            overlay.destroy()
+        self._is_fullscreen = False
+        if self._fs_btn is not None:
+            self._fs_btn.configure(text="全屏", width=72)
+        self.apply_filter()
+
+    def _pull_peer_state(self) -> None:
+        peer = self._fs_peer
+        if peer is None:
+            return
+        search = peer.search_var.get()
+        filt = peer.filter_var.get()
+        if self.search_var.get() != search:
+            self.search_var.set(search)
+        if self.filter_var.get() != filt:
+            self.filter_var.set(filt)
+
+    def _on_fs_escape(self, _event=None):
+        if self._is_fullscreen:
+            self.exit_fullscreen()
+            return "break"
+        return None
+
+    def _on_destroy(self, event) -> None:
+        if event.widget is not self:
+            return
+        if self._is_fullscreen:
+            self.exit_fullscreen()
+
     def set_filters(self, values: list[str]) -> None:
+        self._filter_values = values
         current = self.filter_var.get()
         self.filter_box.configure(values=values)
         if current in values:
             self.filter_var.set(current)
         else:
             self.filter_var.set("全部")
+        if self._fs_peer is not None:
+            self._fs_peer.set_filters(values)
 
     def set_rows(self, rows: list[dict[str, Any]], full_map: Optional[dict[str, str]] = None) -> None:
         self._rows = rows
         self._full_values = full_map or {}
         self._by_id = {row_identity(row, idx): row for idx, row in enumerate(rows)}
         self._sync_tree()
+        if self._fs_peer is not None:
+            self._fs_peer.set_rows(rows, full_map)
 
     def upsert_row(self, row: dict[str, Any]) -> None:
         iid = row_identity(row)
@@ -101,6 +207,8 @@ class DataTable(ctk.CTkFrame):
             if self.tree.exists(iid):
                 self.tree.delete(iid)
             self._update_count()
+            if self._fs_peer is not None:
+                self._fs_peer.upsert_row(row)
             return
         values = self._values(current)
         tags = self._tags(current)
@@ -110,6 +218,8 @@ class DataTable(ctk.CTkFrame):
         else:
             self.tree.insert("", "end", iid=iid, values=values, tags=tags)
         self._update_count()
+        if self._fs_peer is not None:
+            self._fs_peer.upsert_row(row)
 
     def row_by_id(self, iid: str) -> Optional[dict[str, Any]]:
         return self._by_id.get(iid)

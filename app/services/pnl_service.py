@@ -7,7 +7,7 @@ from typing import Optional
 
 from app.domain.enums import EventType, FieldStatus
 from app.domain.models import TradeRecord
-from app.utils.money import to_decimal
+from app.utils.money import format_usd, to_decimal
 
 
 @dataclass
@@ -62,14 +62,14 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
             lots.append(
                 CostLot(
                     amount=amount,
-                    cost_usd=None,
+                    cost_usd=trade.cost_usd,
                     timestamp=trade.timestamp,
                     tx_hash=trade.tx_hash,
-                    known_cost=False,
+                    known_cost=trade.cost_usd is not None,
                 )
             )
-            trade.single_pnl_display = "不适用（转入）"
-            trade.missing_cost = True
+            trade.single_pnl_display = "转入"
+            trade.missing_cost = trade.cost_usd is None
             continue
         if trade.event_type in (EventType.SELL, EventType.REMOVE, EventType.TRANSFER_OUT):
             remaining = amount
@@ -108,12 +108,12 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
                     trade.missing_cost = True
                 else:
                     pnl = trade.cost_usd - matched_cost
-                    trade.single_pnl_display = format(pnl, "f")
+                    trade.single_pnl_display = format_usd(pnl)
                     trade.missing_cost = False
                     realized = (realized or Decimal("0")) + pnl
                     has_verified_sell = True
             elif trade.event_type == EventType.TRANSFER_OUT:
-                trade.single_pnl_display = "不适用（转出）"
+                trade.single_pnl_display = "转出"
                 trade.missing_cost = unverifiable
             else:
                 trade.single_pnl_display = "未实现"
@@ -122,14 +122,11 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
 
     balance = sum((lot.amount for lot in lots), Decimal("0"))
     remaining_cost = Decimal("0")
-    remaining_known = True
     for lot in lots:
         if lot.amount <= 0:
             continue
         if lot.known_cost and lot.cost_usd is not None:
             remaining_cost += lot.cost_usd
-        else:
-            remaining_known = False
     if has_verified_sell:
         realized_out = realized
     elif missing_sells == 0:
@@ -145,5 +142,5 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
         missing_cost_usd=missing_usd if has_missing_usd else None,
         current_balance=balance,
         last_sell_ts=last_sell,
-        remaining_cost_usd=remaining_cost if remaining_known else None,
+        remaining_cost_usd=remaining_cost,
     )

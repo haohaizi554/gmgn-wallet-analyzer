@@ -529,6 +529,13 @@ class WalletAnalysisService:
             if primary:
                 pool_info = _pool_info_from_pair(token_address, primary)
 
+        current_price = _derive_current_price(pool_info, pairs, token_info, meta, token_address)
+        sol_usd = self.orchestrator.sol_usd_price() if self.orchestrator is not None else None
+        from app.resolvers.historical_price import fill_trade_mark_usd
+
+        for trade in history:
+            fill_trade_mark_usd(trade, current_price, sol_usd)
+
         acq = resolve_acquisition(
             history,
             token_info,
@@ -656,7 +663,15 @@ class WalletAnalysisService:
                 except Exception as exc:
                     logger.warning("链上核验 First Buy 失败: %s", exc)
         else:
-            first_buy_display = not_applicable("wallet_activity", "不适用（转入获得）")
+            if acq.cost_usd is not None:
+                first_buy_display = known(
+                    acq.cost_usd,
+                    "wallet_activity.transferIn.cost_usd",
+                    estimated=True,
+                    reason="转入按现价估值",
+                )
+            else:
+                first_buy_display = missing("wallet_activity", "无法验证首次获得金额")
             first_amount = known(acq.amount, "wallet_activity.transferIn.token_amount") if acq.amount is not None else missing("wallet_activity", "无法验证")
             first_time = known(acq.timestamp, "wallet_activity.transferIn.timestamp") if acq.timestamp else missing("wallet_activity", "无首次获得时间")
 
@@ -667,8 +682,6 @@ class WalletAnalysisService:
                 estimated=acq.market_cap_is_estimated,
                 reason="使用当前供给估算" if acq.market_cap_is_estimated else "",
             )
-        elif acq.acquisition_type != AcquisitionType.BUY:
-            market_cap = not_applicable("wallet_activity", "无可验证历史市值")
         else:
             price = acq.price_usd
             if price is None and moralis_buy is not None:
@@ -677,10 +690,24 @@ class WalletAnalysisService:
                     usd = moralis_buy.bought.usd_amount or moralis_buy.total_value_usd
                     if usd is not None and moralis_buy.bought.amount:
                         price = abs(usd) / abs(moralis_buy.bought.amount)
+            if price is None:
+                price = current_price
             allow_rpc = bool(self.orchestrator and self.orchestrator.verification_mode == VerificationMode.STRICT)
             supply_now = _resolve_supply(token_info, meta, pool_info, pairs, token_address, self.orchestrator if allow_rpc else None)
             entry = resolve_entry_market_cap(price, None, supply_now)
             market_cap = entry.to_audited()
+            if not _audited_filled(market_cap):
+                primary_pair = select_primary_pool(pairs, token_address) if pairs else None
+                live_mcap = None
+                if primary_pair is not None:
+                    live_mcap = primary_pair.market_cap or primary_pair.fdv
+                if live_mcap not in (None, 0):
+                    market_cap = known(
+                        live_mcap,
+                        getattr(primary_pair, "source", "") or "market",
+                        estimated=True,
+                        reason="无历史入场市值，用当前市值",
+                    )
 
         fifo_profit = (
             known(fifo.realized_profit, "local_fifo", estimated=cost_est_any, reason="无已实现卖出" if fifo.realized_profit == 0 and not fifo.missing_cost_count else "")
@@ -688,15 +715,13 @@ class WalletAnalysisService:
             else not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "无已实现卖出")
         )
         realized_profit = fifo_profit
-        current_price = None
-        if pool_info and pool_info.price is not None:
-            current_price = pool_info.price
-        elif acq.price_usd is not None:
-            current_price = acq.price_usd
+        if current_price is None:
+            current_price = _derive_current_price(pool_info, pairs, token_info, meta, token_address)
         if fifo.current_balance <= 0:
             unrealized_profit = known(Decimal("0"), "local_fifo", reason="已清仓")
-        elif current_price is not None and fifo.remaining_cost_usd is not None:
-            unrl = current_price * fifo.current_balance - fifo.remaining_cost_usd
+        elif current_price is not None:
+            remaining = fifo.remaining_cost_usd if fifo.remaining_cost_usd is not None else Decimal("0")
+            unrl = current_price * fifo.current_balance - remaining
             unrealized_profit = known(unrl, "local_fifo", estimated=True, reason="当前价 × 余额 − 剩余成本")
         else:
             unrealized_profit = missing("wallet_holdings", "当前价或剩余成本不足，无法估算未实现盈亏")
@@ -707,8 +732,10 @@ class WalletAnalysisService:
             total_profit = known(total_value, "local_fifo", estimated=unrealized_profit.estimated or cost_est_any)
             if buy_total not in (None, 0):
                 total_profit_pnl = known(total_value / buy_total, "local_fifo", estimated=True)
+            elif acq.cost_usd not in (None, 0):
+                total_profit_pnl = known(total_value / acq.cost_usd, "local_fifo", estimated=True, reason="用首次获得金额作分母")
             else:
-                total_profit_pnl = not_applicable("local_fifo", "无买入总额，无法计算收益率")
+                total_profit_pnl = known(Decimal("0"), "local_fifo", estimated=True, reason="无成本基数，收益率记 0")
         else:
             total_profit = not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "盈亏构成不完整")
             total_profit_pnl = not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "盈亏构成不完整")
@@ -727,12 +754,28 @@ class WalletAnalysisService:
             notes.append(token_info.info_error)
             status = TaskStatus.WARNING
 
+        from app.utils.text import token_display_labels
+
+        pair_symbol = ""
+        if pairs:
+            primary_for_label = select_primary_pool(pairs, token_address)
+            if primary_for_label is not None:
+                pair_symbol = getattr(primary_for_label, "base_symbol", "") or ""
+        symbol, name = token_display_labels(
+            token_info.symbol if token_info else "",
+            token_info.name if token_info else "",
+            getattr(meta, "symbol", "") if meta is not None else "",
+            getattr(meta, "name", "") if meta is not None else "",
+            pair_symbol,
+            symbol,
+            fallback=token_address[:6] if token_address else "未知",
+        )
         result = TokenAnalysisResult(
             wallet_address=request.wallet_address,
             token_address=token_address,
             chain=request.chain,
-            symbol=((token_info.symbol if token_info else "") or symbol or "").strip() or "未知",
-            name=((token_info.name if token_info else "") or symbol or "").strip() or "未知",
+            symbol=symbol,
+            name=name,
             source_platform=platform,
             launchpad_platform=platforms.launchpad_platform,
             asset_source=platforms.asset_source,
@@ -808,6 +851,8 @@ class WalletAnalysisService:
                     "jupiter": DataSource.JUPITER,
                     "geckoterminal": DataSource.GECKOTERMINAL,
                     "pumpfun": DataSource.PUMPFUN,
+                    "defillama": DataSource.DEFILLAMA,
+                    "raydium": DataSource.RAYDIUM,
                 }.get(getattr(primary_pair, "source", "") or "", DataSource.DEXSCREENER)
                 candidates[src] = primary_pair.market_cap
             if candidates:
@@ -823,6 +868,8 @@ class WalletAnalysisService:
                     "jupiter": DataSource.JUPITER,
                     "geckoterminal": DataSource.GECKOTERMINAL,
                     "pumpfun": DataSource.PUMPFUN,
+                    "defillama": DataSource.DEFILLAMA,
+                    "raydium": DataSource.RAYDIUM,
                 }.get(getattr(primary_pair, "source", "") or "", DataSource.DEXSCREENER)
                 fdv_cands[src] = primary_pair.fdv
             if fdv_cands:
@@ -989,19 +1036,29 @@ class WalletAnalysisService:
         )
 
     def _stamp_trade_symbols(self, trades: list[TradeRecord], metadata_map: dict | None, pool_map: dict | None) -> None:
+        from app.utils.text import token_display_labels, visible_text
+
         for trade in trades or []:
-            if trade.token_symbol and trade.token_symbol != "未知":
-                continue
             meta = (metadata_map or {}).get(trade.token_address)
-            if meta is not None and getattr(meta, "symbol", ""):
-                trade.token_symbol = meta.symbol
-                trade.token_name = meta.name or meta.symbol
-                continue
+            pair_symbol = ""
             for pair in (pool_map or {}).get(trade.token_address) or []:
-                if getattr(pair, "base_address", "") == trade.token_address and getattr(pair, "base_symbol", ""):
-                    trade.token_symbol = pair.base_symbol
-                    trade.token_name = pair.base_symbol
+                if getattr(pair, "base_address", "") == trade.token_address:
+                    pair_symbol = getattr(pair, "base_symbol", "") or ""
                     break
+            fallback = (trade.token_address or "")[:6] or "未知"
+            symbol, name = token_display_labels(
+                trade.token_symbol,
+                trade.token_name,
+                getattr(meta, "symbol", "") if meta is not None else "",
+                getattr(meta, "name", "") if meta is not None else "",
+                pair_symbol,
+                fallback=fallback,
+            )
+            if not visible_text(trade.token_symbol) or trade.token_symbol == "未知":
+                trade.token_symbol = symbol
+            else:
+                trade.token_symbol = visible_text(trade.token_symbol) or symbol
+            trade.token_name = visible_text(trade.token_name) or name
 
     def _progress(self, stage: str, message: str, done: int, total: int, wallet: str, token: str) -> None:
         if stage not in {"first_buy", "token"}:
@@ -1040,6 +1097,21 @@ def _audited_filled(value: AuditedValue) -> bool:
         FieldStatus.DERIVED,
         FieldStatus.ESTIMATED,
     }
+
+
+def _derive_current_price(pool_info, pairs, token_info, meta, token_address):
+    if pool_info is not None and getattr(pool_info, "price", None) not in (None, 0):
+        return pool_info.price
+    primary = select_primary_pool(pairs, token_address) if pairs else None
+    if primary is not None and getattr(primary, "price_usd", None) not in (None, 0):
+        return primary.price_usd
+    supply_now = _resolve_supply(token_info, meta, pool_info, pairs, token_address, None)
+    mcap_now = None
+    if primary is not None:
+        mcap_now = getattr(primary, "market_cap", None) or getattr(primary, "fdv", None)
+    if mcap_now not in (None, 0) and supply_now not in (None, 0):
+        return mcap_now / supply_now
+    return None
 
 
 def _pool_info_from_pair(token_address: str, primary) -> TokenPoolInfo:
@@ -1082,11 +1154,14 @@ def _resolve_supply(token_info, meta, pool_info, pairs, token_address: str, orch
 
 
 def _token_info_from_metadata(meta: TokenMetadata, token_address: str, chain: str) -> TokenInfo:
+    from app.utils.text import token_display_labels
+
+    symbol, name = token_display_labels(meta.symbol, meta.name, fallback=token_address[:6] if token_address else "未知")
     return TokenInfo(
         token_address=token_address,
         chain=chain,
-        symbol=meta.symbol or "未知",
-        name=meta.name or meta.symbol or "未知",
+        symbol=symbol,
+        name=name,
         total_supply=meta.total_supply_formatted or meta.total_supply,
         circulating_supply=meta.circulating_supply,
         raw=meta.raw,

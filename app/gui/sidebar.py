@@ -8,7 +8,7 @@ from app.gui.theme import PRIMARY_HOVER, font
 NAV_ITEMS = [
     ("analysis", "分析任务"),
     ("history", "历史记录"),
-    ("export", "数据导出"),
+    ("viz", "数据可视化"),
     ("settings", "系统设置"),
     ("about", "关于"),
 ]

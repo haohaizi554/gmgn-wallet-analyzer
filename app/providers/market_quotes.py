@@ -80,7 +80,60 @@ def merge_pair(existing: DexPair, extra: DexPair) -> DexPair:
         filled.append(extra.source)
         raw["_filled_from"] = filled
         existing.raw = raw
+    if existing.fdv in (None, 0) and existing.market_cap not in (None, 0):
+        existing.fdv = existing.market_cap
+    if existing.market_cap in (None, 0) and existing.fdv not in (None, 0):
+        existing.market_cap = existing.fdv
     return existing
+
+
+def merge_quote_fields(existing: MarketQuote, extra: MarketQuote) -> MarketQuote:
+    if existing.price_usd in (None, 0) and extra.price_usd not in (None, 0):
+        existing.price_usd = extra.price_usd
+    if existing.market_cap in (None, 0) and extra.market_cap not in (None, 0):
+        existing.market_cap = extra.market_cap
+    if existing.fdv in (None, 0) and extra.fdv not in (None, 0):
+        existing.fdv = extra.fdv
+    if existing.liquidity_usd in (None, 0) and extra.liquidity_usd not in (None, 0):
+        existing.liquidity_usd = extra.liquidity_usd
+    if not existing.pair_created_at and extra.pair_created_at:
+        existing.pair_created_at = extra.pair_created_at
+    if not existing.pair_address and extra.pair_address:
+        existing.pair_address = extra.pair_address
+    if not existing.dex_id and extra.dex_id:
+        existing.dex_id = extra.dex_id
+    if not existing.symbol and extra.symbol:
+        existing.symbol = extra.symbol
+    if not existing.name and extra.name:
+        existing.name = extra.name
+    if extra.source and extra.source not in (existing.raw or {}).get("_filled_from", []):
+        raw = dict(existing.raw or {})
+        filled = list(raw.get("_filled_from") or [])
+        filled.append(extra.source)
+        raw["_filled_from"] = filled
+        if extra.raw:
+            raw[f"_{extra.source}_raw"] = extra.raw
+        existing.raw = raw
+    if existing.market_cap in (None, 0) and extra.market_cap not in (None, 0):
+        existing.market_cap = extra.market_cap
+    if existing.fdv in (None, 0) and existing.market_cap not in (None, 0):
+        existing.fdv = existing.market_cap
+    if existing.market_cap in (None, 0) and existing.fdv not in (None, 0):
+        existing.market_cap = existing.fdv
+    return existing
+
+
+def merge_quote_lists(existing: list[MarketQuote], extra: list[MarketQuote]) -> list[MarketQuote]:
+    by_mint: dict[str, MarketQuote] = {item.mint: item for item in existing if item.mint}
+    for quote in extra:
+        if not quote.mint:
+            continue
+        current = by_mint.get(quote.mint)
+        if current is None:
+            by_mint[quote.mint] = quote
+            continue
+        merge_quote_fields(current, quote)
+    return list(by_mint.values())
 
 
 def merge_quotes(grouped: dict[str, list[DexPair]], quotes: list[MarketQuote]) -> dict[str, list[DexPair]]:

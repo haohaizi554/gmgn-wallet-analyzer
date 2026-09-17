@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from app.domain.enums import ProviderCapability, ProviderHealth
@@ -68,9 +69,27 @@ def parse_coin(item: Any) -> MarketQuote | None:
         return None
     mcap = decimal_or_none(item.get("usd_market_cap") or item.get("market_cap"))
     created = created_at_from(item.get("created_timestamp") or item.get("createdAt"))
+    price = to_decimal(item.get("price_usd") or item.get("usd_price") or item.get("price"))
+    decimals = 6
+    try:
+        if item.get("decimals") not in (None, ""):
+            decimals = int(item.get("decimals"))
+    except (TypeError, ValueError):
+        decimals = 6
+    raw_supply = to_decimal(item.get("total_supply") or item.get("token_total_supply"))
+    supply = None
+    if raw_supply not in (None, 0):
+        supply = raw_supply / (Decimal(10) ** decimals) if raw_supply >= Decimal("1000000000") else raw_supply
+    if price in (None, 0) and mcap not in (None, 0) and supply not in (None, 0):
+        price = mcap / supply
+    virtual_sol = to_decimal(item.get("virtual_sol_reserves"))
+    virtual_token = to_decimal(item.get("virtual_token_reserves"))
+    if price in (None, 0) and virtual_sol not in (None, 0) and virtual_token not in (None, 0):
+        # bonding-curve relative price in SOL; leave as None without SOL/USD here
+        pass
     return MarketQuote(
         mint=mint,
-        price_usd=to_decimal(item.get("price_usd") or item.get("usd_price")),
+        price_usd=price,
         market_cap=mcap,
         fdv=mcap,
         pair_created_at=created,

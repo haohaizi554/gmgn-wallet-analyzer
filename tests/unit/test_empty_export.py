@@ -49,7 +49,7 @@ class EmptyExportTests(unittest.TestCase):
             holding_duration_seconds=known(20, "calc"),
             missing_cost_count=1,
             status=TaskStatus.WARNING,
-            first_buy_display=AuditedValue(None, "activity", FieldStatus.NOT_APPLICABLE, reason="不适用（转入获得）"),
+            first_buy_display=known(Decimal("12.5"), "activity", estimated=True),
             first_buy_amount=known(Decimal("1"), "activity"),
             first_buy_time=known(100, "activity"),
             market_cap=AuditedValue(None, "activity", FieldStatus.NOT_APPLICABLE, reason="无可验证历史市值"),
@@ -60,7 +60,8 @@ class EmptyExportTests(unittest.TestCase):
         trade = TradeRecord("Wallet", "sol", "Mint", "ZZ", "ZZ", "hash", 120, EventType.SELL, Decimal("1"), Decimal("10"), Decimal("10"), None, None, None, None, {}, single_pnl_display="无法验证历史成本")
         trow = svc.trade_export_row(trade, "Raydium")
         assert_no_empty_export_cells([row, trow])
-        self.assertEqual(row["首笔买入"], "不适用（转入获得）")
+        self.assertIn("$", row["首笔买入"])
+        self.assertNotIn("不适用", row["首笔买入"])
         self.assertNotIn(None, row.values())
         self.assertNotIn("", row.values())
 
@@ -115,6 +116,56 @@ class EmptyExportTests(unittest.TestCase):
         self.assertNotIn("GMGN 利润接口", row["已实现盈亏"])
         self.assertNotIn("无法验证卖出总额", row["卖出总额"])
         self.assertNotEqual(row["开盘时间"], "GMGN 未提供")
+
+    def test_negative_time_diff_is_signed_duration(self):
+        acq = AcquisitionInfo(
+            acquisition_type=AcquisitionType.BUY,
+            timestamp=50,
+            price_usd=Decimal("1"),
+            amount=Decimal("1"),
+            cost_usd=Decimal("10"),
+            cost_sol=None,
+            gas_usd=None,
+            gas_sol=None,
+            market_cap=Decimal("1000"),
+            status=AcquisitionStatus.INFERRED,
+            reason="",
+            source="wallet_activity",
+        )
+        token = TokenAnalysisResult(
+            wallet_address="Wallet",
+            token_address="Mint",
+            chain="sol",
+            symbol="AA",
+            name="AA",
+            source_platform=known("Pump.fun", "dex"),
+            acquisition=acq,
+            created_at=known(150, "token_info.creation_timestamp"),
+            open_at=known(150, "dexscreener.pairCreatedAt", estimated=True),
+            pool_created_at=known(150, "dexscreener.pairCreatedAt"),
+            time_diff_seconds=known(-100, "calc"),
+            buy_count=1,
+            buy_total_usd=Decimal("10"),
+            sell_count=0,
+            sell_total_usd=Decimal("0"),
+            realized_profit=known(Decimal("0"), "local_fifo", reason="无已实现卖出"),
+            unrealized_profit=known(Decimal("5"), "local_fifo", estimated=True),
+            total_profit=known(Decimal("5"), "local_fifo", estimated=True),
+            total_profit_pnl=known(Decimal("0.5"), "local_fifo", estimated=True),
+            fifo_realized_profit=known(Decimal("0"), "local_fifo"),
+            current_balance=Decimal("1"),
+            holding_duration_seconds=known(20, "calc"),
+            missing_cost_count=0,
+            status=TaskStatus.SUCCESS,
+            first_buy_display=known(Decimal("10"), "activity"),
+            first_buy_amount=known(Decimal("1"), "activity"),
+            first_buy_time=known(50, "activity"),
+            market_cap=known(Decimal("1000"), "activity", estimated=True),
+        )
+        row = CompletenessService().token_export_row(token)
+        self.assertEqual(row["时差"], "-1分钟")
+        self.assertEqual(row["时差HMS"], "-00:01:40")
+        self.assertNotIn("时间异常", row["时差"])
 
 
 if __name__ == "__main__":

@@ -91,19 +91,21 @@ def format_duration_zh(seconds: Optional[int]) -> str:
     if seconds is None:
         return "无法计算"
     value = int(seconds)
-    if value < 0:
-        return "时间异常"
+    sign = "-" if value < 0 else ""
+    value = abs(value)
     if value < 60:
-        return f"{value}秒"
+        return f"{sign}{value}秒"
     if value < 3600:
-        return f"{value // 60}分钟"
+        return f"{sign}{value // 60}分钟"
     if value < 86400:
         hours = value // 3600
         minutes = (value % 3600) // 60
-        return f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
+        body = f"{hours}小时" if minutes == 0 else f"{hours}小时{minutes}分钟"
+        return f"{sign}{body}"
     days = value // 86400
     hours = (value % 86400) // 3600
-    return f"{days}天" if hours == 0 else f"{days}天{hours}小时"
+    body = f"{days}天" if hours == 0 else f"{days}天{hours}小时"
+    return f"{sign}{body}"
 
 
 def format_hms_unbounded(seconds: Optional[int]) -> str:

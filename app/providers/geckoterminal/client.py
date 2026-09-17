@@ -5,11 +5,12 @@ from typing import Any
 from app.domain.enums import ProviderCapability, ProviderHealth
 from app.providers.base import DataProvider, IndependentRateLimiter
 from app.providers.cache import ProviderCache
+from app.providers.exceptions import ProviderError
 from app.providers.http import HttpProviderMixin
-from app.providers.market_quotes import MarketQuote, decimal_or_none
+from app.providers.market_quotes import MarketQuote, created_at_from, decimal_or_none, merge_quote_lists
 from app.utils.money import to_decimal
 
-BATCH_SIZE = 30
+BATCH_SIZE = 20
 QUOTE_TTL = 180
 
 
@@ -54,21 +55,66 @@ class GeckoTerminalProvider(HttpProviderMixin, DataProvider):
             pending = unique
         for i in range(0, len(pending), BATCH_SIZE):
             chunk = pending[i : i + BATCH_SIZE]
-            joined = ",".join(chunk)
-            url = f"{self.base_url}/networks/solana/tokens/multi/{joined}"
+            out = merge_quote_lists(out, self._fetch_multi_or_singles(chunk))
+        missing = [mint for mint in unique if not _has_price(out, mint)]
+        if missing:
+            out = merge_quote_lists(out, self._fetch_pools(missing))
+        if self.cache:
+            for quote in out:
+                if quote.raw:
+                    self.cache.set(self.name, "TOKEN_MARKET", quote.mint, quote.raw, QUOTE_TTL)
+        return out
+
+    def _fetch_multi_or_singles(self, chunk: list[str]) -> list[MarketQuote]:
+        joined = ",".join(chunk)
+        url = f"{self.base_url}/networks/solana/tokens/multi/{joined}"
+        try:
             payload = self.http_request("GET", url, headers={"Accept": "application/json"}, provider=self)
-            rows = _rows(payload)
-            by_mint: dict[str, dict[str, Any]] = {}
-            for item in rows:
-                parsed = parse_token(item)
-                if parsed is None:
-                    continue
+            return [parsed for item in _rows(payload) if (parsed := parse_token(item))]
+        except ProviderError as exc:
+            if exc.status == 429:
+                raise
+        return self._fetch_singles(chunk)
+
+    def _fetch_singles(self, mints: list[str]) -> list[MarketQuote]:
+        out: list[MarketQuote] = []
+        for mint in mints:
+            url = f"{self.base_url}/networks/solana/tokens/{mint}"
+            try:
+                payload = self.http_request("GET", url, headers={"Accept": "application/json"}, provider=self)
+            except ProviderError as exc:
+                if exc.status == 429:
+                    raise
+                continue
+            parsed = parse_token(payload if isinstance(payload, dict) else {})
+            if parsed is None:
+                for item in _rows(payload):
+                    parsed = parse_token(item)
+                    if parsed:
+                        break
+            if parsed:
                 out.append(parsed)
-                by_mint[parsed.mint] = parsed.raw
-            if self.cache:
-                for mint in chunk:
-                    if mint in by_mint:
-                        self.cache.set(self.name, "TOKEN_MARKET", mint, by_mint[mint], QUOTE_TTL)
+        return out
+
+    def _fetch_pools(self, mints: list[str]) -> list[MarketQuote]:
+        out: list[MarketQuote] = []
+        for mint in mints:
+            url = f"{self.base_url}/networks/solana/tokens/{mint}/pools"
+            try:
+                payload = self.http_request(
+                    "GET",
+                    url,
+                    params={"page": 1},
+                    headers={"Accept": "application/json"},
+                    provider=self,
+                )
+            except ProviderError as exc:
+                if exc.status == 429:
+                    raise
+                continue
+            parsed = parse_pool_quote(mint, payload)
+            if parsed:
+                out.append(parsed)
         return out
 
     def test_connection(self) -> dict[str, Any]:
@@ -110,3 +156,41 @@ def parse_token(item: Any) -> MarketQuote | None:
         source="geckoterminal",
         raw=item,
     )
+
+
+def parse_pool_quote(mint: str, payload: Any) -> MarketQuote | None:
+    best: MarketQuote | None = None
+    best_liq = None
+    for item in _rows(payload):
+        attrs = item.get("attributes") if isinstance(item.get("attributes"), dict) else item
+        price = to_decimal(attrs.get("base_token_price_usd") or attrs.get("quote_token_price_usd") or attrs.get("token_price_usd"))
+        liq = decimal_or_none(attrs.get("reserve_in_usd") or attrs.get("base_token_price_native_currency"))
+        mcap = decimal_or_none(attrs.get("market_cap_usd"))
+        fdv = decimal_or_none(attrs.get("fdv_usd"))
+        created = created_at_from(attrs.get("pool_created_at") or attrs.get("created_at"))
+        quote = MarketQuote(
+            mint=mint,
+            price_usd=price,
+            market_cap=mcap,
+            fdv=fdv,
+            liquidity_usd=liq,
+            pair_created_at=created,
+            dex_id=str(attrs.get("name") or "geckoterminal"),
+            pair_address=str(attrs.get("address") or item.get("id") or ""),
+            source="geckoterminal",
+            raw=item,
+        )
+        if quote.price_usd in (None, 0) and quote.market_cap in (None, 0) and quote.fdv in (None, 0):
+            continue
+        score = liq or 0
+        if best is None or score > (best_liq or 0):
+            best = quote
+            best_liq = score
+    return best
+
+
+def _has_price(quotes: list[MarketQuote], mint: str) -> bool:
+    for quote in quotes:
+        if quote.mint == mint and quote.price_usd not in (None, 0):
+            return True
+    return False

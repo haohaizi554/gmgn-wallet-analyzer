@@ -6,7 +6,8 @@ from typing import Any, Iterable
 from app.domain.enums import AcquisitionType, EventType, FieldStatus, TokenPositionStatus
 from app.domain.formatters import format_duration_zh, format_hms_unbounded, safe_export_value
 from app.domain.models import AuditedValue, TokenAnalysisResult, TradeRecord, WarningRecord
-from app.utils.money import to_decimal
+from app.utils.money import format_usd, to_decimal
+from app.utils.text import token_display_labels
 from app.utils.time_utils import format_datetime, now_ts
 
 
@@ -43,8 +44,6 @@ class CompletenessService:
     def token_export_row(self, token: TokenAnalysisResult) -> dict[str, Any]:
         acq = token.acquisition
         first_buy = token.first_buy_display.export("usd_compact")
-        if acq.acquisition_type != AcquisitionType.BUY:
-            first_buy = safe_export_value(None, FieldStatus.NOT_APPLICABLE, reason="不适用（转入获得）")
         buy_time = token.first_buy_time.export("datetime")
         created = token.created_at.export("datetime")
         time_diff = token.time_diff_seconds
@@ -82,10 +81,11 @@ class CompletenessService:
                 kind="usd",
                 reason="无法验证卖出总额",
             )
+        symbol, name = token_display_labels(token.symbol, token.name, fallback=(token.token_address or "")[:6] or "未知")
         row = {
             "#": 0,
-            "币种": (token.symbol or "").strip() or "未知",
-            "代币名称": (token.name or token.symbol or "").strip() or "未知",
+            "币种": symbol,
+            "代币名称": name,
             "代币合约": token.token_address or "未知地址",
             "来源平台": _audited_or_missing(token.source_platform, "text"),
             "获得方式": acq.acquisition_type.value,
@@ -152,15 +152,15 @@ class CompletenessService:
         elif trade.event_type == EventType.SELL:
             pnl = trade.single_pnl_display or "无法验证历史成本"
         elif trade.event_type == EventType.TRANSFER_IN:
-            pnl = "不适用（转入）"
+            pnl = format_usd(Decimal("0"))
         elif trade.event_type == EventType.TRANSFER_OUT:
-            pnl = "不适用（转出）"
+            pnl = format_usd(Decimal("0"))
         else:
             pnl = "未实现"
         row = {
             "时间": format_datetime(trade.timestamp) if trade.timestamp else "GMGN 未提供",
             "类型": trade.event_type.value,
-            "币种": trade.token_symbol or "未知",
+            "币种": token_display_labels(trade.token_symbol, trade.token_name, fallback=(trade.token_address or "")[:6] or "未知")[0],
             "代币合约": trade.token_address or "未知地址",
             "数量": safe_export_value(trade.token_amount, trade.amount_status, kind="amount"),
             "USD金额": safe_export_value(
@@ -226,7 +226,7 @@ class CompletenessService:
                     token_address=token.token_address,
                     token_symbol=token.symbol,
                     field_name="首笔买入",
-                    final_value="不适用（转入获得）" if token.acquisition.acquisition_type == AcquisitionType.TRANSFER_IN else token.acquisition.acquisition_type.value,
+                    final_value=str(token.first_buy_display.export("usd_compact")),
                     status=token.acquisition.status.value,
                     reason=token.acquisition.reason,
                     source=token.acquisition.source,

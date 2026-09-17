@@ -14,7 +14,18 @@ class HistoryPage(ctk.CTkFrame):
     def __init__(self, master, app, **kwargs):
         super().__init__(master, fg_color=BG, **kwargs)
         self.app = app
-        ctk.CTkLabel(self, text="历史记录", font=font(20, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 8))
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.pack(fill="x", padx=20, pady=(20, 8))
+        ctk.CTkLabel(head, text="历史记录", font=font(20, "bold"), text_color=TEXT, anchor="w").pack(side="left")
+        ctk.CTkButton(
+            head,
+            text="清空",
+            width=80,
+            height=30,
+            fg_color=DANGER,
+            hover_color="#991B1B",
+            command=self._clear_all,
+        ).pack(side="right")
         ctk.CTkLabel(self, text="本地 SQLite 保存的分析报告，可打开 Excel / JSON。", font=font(13), text_color=MUTED, anchor="w").pack(fill="x", padx=20)
         self.listbox = ctk.CTkScrollableFrame(self, fg_color=PANEL)
         self.listbox.pack(fill="both", expand=True, padx=20, pady=16)
@@ -170,6 +181,9 @@ class HistoryPage(ctk.CTkFrame):
             return
         self._drop_row(f"job:{job_id}")
         self._dirty = False
+        viz = self.app.pages.get("viz")
+        if viz:
+            viz.mark_dirty()
 
     def _delete_report(self, report_id: str) -> None:
         if not messagebox.askyesno("删除记录", "删除这条报告记录？此操作不可撤销。"):
@@ -181,6 +195,27 @@ class HistoryPage(ctk.CTkFrame):
             return
         self._drop_row(f"report:{report_id}")
         self._dirty = False
+        viz = self.app.pages.get("viz")
+        if viz:
+            viz.mark_dirty()
+
+    def _clear_all(self) -> None:
+        jobs = self.app.db_repos.list_jobs(1)
+        reports = self.app.db_repos.list_reports(1)
+        if not jobs and not reports:
+            messagebox.showinfo("清空", "当前没有历史记录")
+            return
+        if not messagebox.askyesno("清空历史", "清空全部历史记录？列表中的任务和报告将被删除，已生成的 Excel / JSON 文件仍保留。此操作不可撤销。"):
+            return
+        try:
+            self.app.db_repos.clear_history()
+        except Exception as exc:
+            messagebox.showerror("清空失败", str(exc))
+            return
+        self.refresh()
+        viz = self.app.pages.get("viz")
+        if viz:
+            viz.mark_dirty()
 
     def _open(self, path: str) -> None:
         if not path or not os.path.exists(path):

@@ -4,7 +4,7 @@ import time
 import queue
 import threading
 from datetime import datetime, timedelta
-from tkinter import filedialog, messagebox
+from tkinter import TclError, filedialog, messagebox
 from typing import Optional
 
 import customtkinter as ctk
@@ -93,6 +93,8 @@ class AnalysisPage(ctk.CTkFrame):
         form.pack(fill="both", expand=True)
         right = ctk.CTkFrame(self, fg_color=BG)
         right.pack(side="left", fill="both", expand=True)
+        self._left_panel = left
+        self._right_panel = right
 
         ctk.CTkLabel(form, text="钱包地址", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
         self.wallet_text = ctk.CTkTextbox(form, height=110, font=font(13))
@@ -160,6 +162,7 @@ class AnalysisPage(ctk.CTkFrame):
         self.progress.pack(fill="x", padx=12, pady=(0, 12))
 
         cards = ctk.CTkFrame(right, fg_color="transparent")
+        self._card_row = cards
         cards.pack(fill="x", padx=12, pady=(12, 0))
         self.cards = {}
         for key, title in [
@@ -190,6 +193,7 @@ class AnalysisPage(ctk.CTkFrame):
                 ("cache", "缓存", 60),
                 ("elapsed", "耗时", 70),
             ],
+            allow_fullscreen=False,
         )
         self.wallet_table.pack(fill="x", padx=12, pady=(8, 0))
         self.wallet_table.tree.configure(height=6)
@@ -197,6 +201,7 @@ class AnalysisPage(ctk.CTkFrame):
 
         tabs = ctk.CTkTabview(right)
         tabs.pack(fill="both", expand=True, padx=12, pady=12)
+        self._tabs = tabs
         self.token_tab = tabs.add("代币分析")
         self.trade_tab = tabs.add("交易明细")
         self.pos_tab = tabs.add("持仓分析")
@@ -206,22 +211,23 @@ class AnalysisPage(ctk.CTkFrame):
         self.log_tab = tabs.add("运行日志")
         self.raw_tab = tabs.add("原始数据")
 
-        self.token_table = DataTable(self.token_tab, TOKEN_COLUMNS)
+        self.token_table = DataTable(self.token_tab, TOKEN_COLUMNS, on_fullscreen=self.toggle_results_fullscreen)
         self.token_table.pack(fill="both", expand=True)
         self.token_table.set_filters(["全部", "有盈利", "亏损", "缺失成本", "特殊获得", "非 Launchpad", "仍持仓", "已清仓"])
-        self.trade_table = DataTable(self.trade_tab, TRADE_COLUMNS)
+        self.trade_table = DataTable(self.trade_tab, TRADE_COLUMNS, on_fullscreen=self.toggle_results_fullscreen)
         self.trade_table.pack(fill="both", expand=True)
         self.trade_table.set_filters(["全部", "buy", "sell", "transferIn", "transferOut"])
-        self.pos_table = DataTable(self.pos_tab, TOKEN_COLUMNS)
+        self.pos_table = DataTable(self.pos_tab, TOKEN_COLUMNS, on_fullscreen=self.toggle_results_fullscreen)
         self.pos_table.pack(fill="both", expand=True)
         self.pnl_table = DataTable(
             self.pnl_tab,
             [("symbol", "币种", 90), ("address", "代币合约", 140), ("fifo", "本地FIFO已实现", 140), ("gmgn", "GMGN说明", 280), ("missing", "缺失成本", 80), ("status", "状态", 90)],
+            on_fullscreen=self.toggle_results_fullscreen,
         )
         self.pnl_table.pack(fill="both", expand=True)
-        self.plat_table = DataTable(self.plat_tab, [("platform", "来源平台", 160), ("count", "Token数", 80), ("buys", "买入笔数", 90), ("sells", "卖出笔数", 90)])
+        self.plat_table = DataTable(self.plat_tab, [("platform", "来源平台", 160), ("count", "Token数", 80), ("buys", "买入笔数", 90), ("sells", "卖出笔数", 90)], on_fullscreen=self.toggle_results_fullscreen)
         self.plat_table.pack(fill="both", expand=True)
-        self.warn_table = DataTable(self.warn_tab, WARN_COLUMNS)
+        self.warn_table = DataTable(self.warn_tab, WARN_COLUMNS, on_fullscreen=self.toggle_results_fullscreen)
         self.warn_table.pack(fill="both", expand=True)
         self.run_log = ctk.CTkTextbox(self.log_tab, font=font(12))
         self.run_log.pack(fill="both", expand=True, padx=8, pady=8)
@@ -231,12 +237,100 @@ class AnalysisPage(ctk.CTkFrame):
         self._pending_report: Optional[WalletReport] = None
         self._last_keys_ts = 0.0
         self._complete = CompletenessService()
+        self._results_fullscreen = False
+        self._fs_pack: list[tuple] = []
+        self._fs_esc: str | None = None
         self._refresh_keys(force=True)
 
     def _refresh_wallet_stats(self) -> None:
         stats = summarize_wallet_input(self.wallet_text.get("1.0", "end"))
         self.wallet_count.configure(text=f"有效钱包：{stats['valid']}  重复：{stats['duplicate']}  无效：{stats['invalid']}")
         self.mode_label.configure(text="模式：批量任务" if stats["valid"] > 1 else "模式：单钱包")
+
+    def _detail_tables(self) -> list[DataTable]:
+        return [
+            self.token_table,
+            self.trade_table,
+            self.pos_table,
+            self.pnl_table,
+            self.plat_table,
+            self.warn_table,
+        ]
+
+    def toggle_results_fullscreen(self) -> None:
+        if self._results_fullscreen:
+            self._exit_results_fullscreen()
+        else:
+            self._enter_results_fullscreen()
+
+    def _hide_packed(self, widget) -> None:
+        try:
+            info = dict(widget.pack_info())
+        except TclError:
+            return
+        slaves = list(widget.master.pack_slaves())
+        try:
+            idx = slaves.index(widget)
+        except ValueError:
+            idx = -1
+        before = slaves[idx + 1] if 0 <= idx < len(slaves) - 1 else None
+        widget.pack_forget()
+        self._fs_pack.append((widget, info, before))
+
+    def _enter_results_fullscreen(self) -> None:
+        if self._results_fullscreen:
+            return
+        self.adv_drawer.close()
+        self._fs_pack = []
+        app = self.app
+        for widget in (
+            self._card_row,
+            self.wallet_table,
+            self._left_panel,
+            getattr(app, "log_panel", None),
+            getattr(app, "status", None),
+            getattr(app, "sidebar", None),
+        ):
+            if widget is not None:
+                self._hide_packed(widget)
+        self._results_fullscreen = True
+        for table in self._detail_tables():
+            table.set_fullscreen_active(True)
+        top = self.winfo_toplevel()
+        self._fs_esc = top.bind("<Escape>", self._on_results_fs_escape, add="+")
+
+    def _exit_results_fullscreen(self) -> None:
+        if not self._results_fullscreen:
+            return
+        top = self.winfo_toplevel()
+        if self._fs_esc:
+            try:
+                top.unbind("<Escape>", self._fs_esc)
+            except TclError:
+                pass
+            self._fs_esc = None
+        for widget, info, before in reversed(self._fs_pack):
+            opts = {k: v for k, v in info.items() if k != "in"}
+            if before is not None:
+                try:
+                    if str(before.winfo_manager()) == "pack":
+                        opts["before"] = before
+                except TclError:
+                    pass
+            try:
+                widget.pack(**opts)
+            except TclError:
+                widget.pack(**{k: v for k, v in opts.items() if k != "before"})
+        self._fs_pack = []
+        self._results_fullscreen = False
+        for table in self._detail_tables():
+            table.set_fullscreen_active(False)
+
+    def _on_results_fs_escape(self, _event=None):
+        if self._results_fullscreen:
+            self._exit_results_fullscreen()
+            return "break"
+        return None
 
     def _toggle_advanced(self) -> None:
         if self.adv_drawer.is_open():
@@ -618,13 +712,13 @@ class AnalysisPage(ctk.CTkFrame):
                     "idx": idx,
                     "symbol": row["币种"],
                     "address": short_address(token.token_address),
-                    "platform": f"{row['来源平台']} [{token.platform_verify_status}]",
+                    "platform": row["来源平台"],
                     "acq": row["获得方式"],
-                    "mcap": f"{row['入场市值']} [{token.market_verify_status}]",
-                    "first_buy": f"{row['首笔买入']} [{token.first_buy_verify_status}]",
+                    "mcap": row["入场市值"],
+                    "first_buy": row["首笔买入"],
                     "amount": row["首买数量"],
-                    "buy_time": f"{row['买入时间']} [{token.first_buy_verify_status}]",
-                    "created": f"{row['创建时间']} [{token.created_verify_status}]",
+                    "buy_time": row["买入时间"],
+                    "created": row["创建时间"],
                     "diff": row["时差"],
                     "hold": row["持仓时长"],
                     "buys": row["买入笔数"],

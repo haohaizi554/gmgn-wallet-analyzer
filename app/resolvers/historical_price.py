@@ -28,6 +28,11 @@ def enrich_swap_usd(swap: WalletSwap, sol_usd: Optional[Decimal] = None) -> Wall
     kind = (swap.transaction_type or "").lower()
     token = swap.bought if kind in {"buy", "transfer_in", "transferin"} else swap.sold
     quote = swap.sold if kind in {"buy", "transfer_in", "transferin"} else swap.bought
+    if sol_usd is not None:
+        raw = dict(swap.raw or {})
+        if not raw.get("_sol_usd"):
+            raw["_sol_usd"] = str(to_decimal(sol_usd))
+            swap.raw = raw
     usd = token.usd_amount if token.usd_amount is not None else swap.total_value_usd
     if usd is None and token.usd_price is not None and token.amount is not None:
         usd = abs(token.usd_price * token.amount)
@@ -74,3 +79,29 @@ def resolve_cost_usd(swap: WalletSwap) -> Optional[ResolvedField]:
     if _is_sol_quote(quote):
         return unresolved(DataSource.LOCAL_CALCULATION, "无法验证历史美元成本", "cost_usd")
     return unresolved(DataSource.LOCAL_CALCULATION, "无法验证历史美元成本", "cost_usd")
+
+
+def fill_trade_mark_usd(trade, price_usd, sol_usd) -> None:
+    """Fill transfer/missing USD and gas from current mark price. Estimated, no display suffix."""
+    from app.domain.enums import EventType, FieldStatus
+
+    px = to_decimal(price_usd)
+    sol_px = to_decimal(sol_usd)
+    if trade.gas_usd is None and trade.gas_sol is not None and sol_px not in (None, 0):
+        trade.gas_usd = abs(trade.gas_sol) * sol_px
+        trade.gas_usd_status = FieldStatus.ESTIMATED
+    if trade.cost_usd is not None:
+        if trade.price_usd is None and trade.token_amount not in (None, 0):
+            trade.price_usd = abs(trade.cost_usd) / abs(trade.token_amount)
+    elif trade.event_type in (EventType.TRANSFER_IN, EventType.TRANSFER_OUT):
+        if px not in (None, 0) and trade.token_amount not in (None, 0):
+            trade.price_usd = px
+            trade.cost_usd = abs(trade.token_amount) * px
+            trade.cost_usd_status = FieldStatus.ESTIMATED
+            trade.cost_usd_estimated = True
+            trade.raw = dict(trade.raw or {})
+            trade.raw["_usd_from_mark"] = True
+    if trade.cost_sol is None and trade.cost_usd is not None and sol_px not in (None, 0):
+        trade.cost_sol = abs(trade.cost_usd) / sol_px
+        trade.cost_sol_estimated = True
+        trade.cost_sol_status = FieldStatus.ESTIMATED

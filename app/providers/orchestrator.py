@@ -8,12 +8,14 @@ from app.providers.base import DataProvider, ProviderMetrics, ProviderStatus
 from app.providers.cache import ProviderCache
 from app.providers.dexscreener.client import DexScreenerProvider
 from app.providers.exceptions import ProviderError, ProviderPlanError, ProviderRateLimitError
+from app.providers.defillama.client import DefiLlamaProvider
 from app.providers.geckoterminal.client import GeckoTerminalProvider
 from app.providers.gmgn.adapter import GMGNVerifierProvider
 from app.providers.helius.client import HeliusProvider, OFFICIAL_RPC
 from app.providers.helius.history import collect_rpc_fallback
 from app.providers.helius.parsers import history_to_swaps
 from app.providers.jupiter.client import JupiterProvider
+from app.providers.raydium.client import RaydiumProvider
 from app.providers.moralis.client import MoralisProvider
 from app.providers.moralis.models import TokenMetadata, TokenSwapIndex, WalletSwap, WalletSwapIndex
 from app.providers.history_cache import merge_history_state, merge_swaps, row_to_swap, swap_to_row
@@ -116,6 +118,8 @@ class DataOrchestrator:
         providers.append(DexScreenerProvider(cache=cache))
         providers.append(JupiterProvider(cache=cache))
         providers.append(GeckoTerminalProvider(cache=cache))
+        providers.append(DefiLlamaProvider(cache=cache))
+        providers.append(RaydiumProvider(cache=cache))
         providers.append(PumpFunProvider(cache=cache))
         enable_gmgn = bool(getattr(config, "enable_gmgn", True))
         deep = bool(getattr(config, "enable_gmgn_deep_history_fallback", False))
@@ -147,6 +151,8 @@ class DataOrchestrator:
                 DexScreenerProvider(),
                 JupiterProvider(),
                 GeckoTerminalProvider(),
+                DefiLlamaProvider(),
+                RaydiumProvider(),
                 PumpFunProvider(),
                 SolanaRpcProvider(),
                 MoralisProvider(api_key="", enabled_flag=False),
@@ -340,6 +346,20 @@ class DataOrchestrator:
             except Exception as exc:
                 logger.warning("Jupiter SOL/USD 获取失败: %s", exc)
                 self._sol_usd = None
+        if self._sol_usd is None:
+            llama = self.providers.get("defillama")
+            if isinstance(llama, DefiLlamaProvider) and llama.enabled:
+                try:
+                    self._sol_usd = llama.get_sol_usd()
+                except Exception as exc:
+                    logger.warning("DefiLlama SOL/USD 获取失败: %s", exc)
+        if self._sol_usd is None:
+            ray = self.providers.get("raydium")
+            if isinstance(ray, RaydiumProvider) and ray.enabled:
+                try:
+                    self._sol_usd = ray.get_sol_usd()
+                except Exception as exc:
+                    logger.warning("Raydium SOL/USD 获取失败: %s", exc)
         if self._sol_usd is None:
             dex = self.providers.get("dexscreener")
             if isinstance(dex, DexScreenerProvider) and dex.enabled:
@@ -539,21 +559,49 @@ class DataOrchestrator:
                         item = helius.parse_das_metadata(asset)
                         if item:
                             out[item.mint] = item
-                    if out:
-                        return out
                 except ProviderError as exc:
                     logger.warning("Helius DAS metadata 失败: %s", exc)
                     helius.metrics.fallback_count += 1
+        missing = [mint for mint in mints if mint and (mint not in out or not (out[mint].symbol or out[mint].name))]
         moralis = self.providers.get("moralis")
-        if isinstance(moralis, MoralisProvider) and moralis.has_capability(ProviderCapability.TOKEN_METADATA):
+        if isinstance(moralis, MoralisProvider) and moralis.has_capability(ProviderCapability.TOKEN_METADATA) and missing:
             before = moralis.metrics.request_count
             try:
-                items = moralis.get_metadata_batch(mints)
+                items = moralis.get_metadata_batch(missing)
                 self.metadata_calls = moralis.metrics.request_count - before
                 for item in items:
-                    out[item.mint] = item
+                    if item.mint and (item.mint not in out or not (out[item.mint].symbol or out[item.mint].name)):
+                        out[item.mint] = item
             except ProviderError as exc:
                 logger.warning("Moralis metadata batch 失败: %s", exc)
+        missing = [mint for mint in mints if mint and (mint not in out or not (out[mint].symbol or out[mint].name))]
+        jup = self.providers.get("jupiter")
+        if isinstance(jup, JupiterProvider) and jup.enabled and missing:
+            try:
+                for quote in jup.get_token_quotes(missing):
+                    if not quote.mint:
+                        continue
+                    current = out.get(quote.mint)
+                    if current is None:
+                        out[quote.mint] = TokenMetadata(
+                            mint=quote.mint,
+                            name=quote.name or quote.symbol,
+                            symbol=quote.symbol or quote.name,
+                            market_cap=quote.market_cap,
+                            fully_diluted_value=quote.fdv,
+                            raw=quote.raw,
+                        )
+                        continue
+                    if not current.symbol and quote.symbol:
+                        current.symbol = quote.symbol
+                    if not current.name and quote.name:
+                        current.name = quote.name
+                    if current.market_cap in (None, 0) and quote.market_cap not in (None, 0):
+                        current.market_cap = quote.market_cap
+                    if current.fully_diluted_value in (None, 0) and quote.fdv not in (None, 0):
+                        current.fully_diluted_value = quote.fdv
+            except ProviderError as exc:
+                logger.warning("Jupiter metadata 失败: %s", exc)
         return out
 
     def batch_pools(self, mints: list[str]) -> dict[str, list]:
@@ -581,35 +629,100 @@ class DataOrchestrator:
     def _enrich_pools(self, grouped: dict[str, list], mints: list[str]) -> dict[str, list]:
         from app.providers.market_quotes import merge_quotes, pair_needs_fill
 
-        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+        for pairs in grouped.values():
+            for pair in pairs or []:
+                if getattr(pair, "fdv", None) in (None, 0) and getattr(pair, "market_cap", None) not in (None, 0):
+                    pair.fdv = pair.market_cap
+                if getattr(pair, "market_cap", None) in (None, 0) and getattr(pair, "fdv", None) not in (None, 0):
+                    pair.market_cap = pair.fdv
+
+        def still_need() -> list[str]:
+            return [mint for mint in mints if mint and pair_needs_fill(grouped.get(mint) or [], mint)]
+
+        def apply_quotes(label: str, quotes) -> None:
+            nonlocal grouped
+            if not quotes:
+                return
+            grouped = merge_quotes(grouped, quotes)
+            logger.info("%s 补齐行情 %s/%s", label, len(quotes), len(still_need()) + len(quotes))
+
+        need = still_need()
         if not need:
             return grouped
+
         jup = self.providers.get("jupiter")
         if isinstance(jup, JupiterProvider) and jup.enabled and need:
             try:
-                quotes = jup.get_token_quotes(need)
-                grouped = merge_quotes(grouped, quotes)
-                logger.info("jupiter 补齐行情 %s/%s", len(quotes), len(need))
+                apply_quotes("jupiter search/price", jup.get_token_quotes(need))
             except ProviderError as exc:
                 logger.warning("Jupiter quotes 失败: %s", exc)
-        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+
+        need = still_need()
         gecko = self.providers.get("geckoterminal")
         if isinstance(gecko, GeckoTerminalProvider) and gecko.enabled and need:
             try:
-                quotes = gecko.get_token_quotes(need)
-                grouped = merge_quotes(grouped, quotes)
-                logger.info("geckoterminal 补齐行情 %s/%s", len(quotes), len(need))
+                apply_quotes("geckoterminal", gecko.get_token_quotes(need))
             except ProviderError as exc:
                 logger.warning("GeckoTerminal quotes 失败: %s", exc)
-        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+
+        need = still_need()
+        llama = self.providers.get("defillama")
+        if isinstance(llama, DefiLlamaProvider) and llama.enabled and need:
+            try:
+                apply_quotes("defillama", llama.get_token_quotes(need))
+            except ProviderError as exc:
+                logger.warning("DefiLlama quotes 失败: %s", exc)
+
+        need = still_need()
+        ray = self.providers.get("raydium")
+        if isinstance(ray, RaydiumProvider) and ray.enabled and need:
+            try:
+                apply_quotes("raydium", ray.get_token_quotes(need))
+            except ProviderError as exc:
+                logger.warning("Raydium quotes 失败: %s", exc)
+
+        need = still_need()
+        dex = self.providers.get("dexscreener")
+        if isinstance(dex, DexScreenerProvider) and dex.enabled and need:
+            filled = 0
+            for mint in list(need):
+                if not pair_needs_fill(grouped.get(mint) or [], mint):
+                    continue
+                try:
+                    extra = dex.get_token_pairs(mint) or []
+                except ProviderError as exc:
+                    logger.warning("DEX token-pairs 失败 %s: %s", mint[:8], exc)
+                    extra = []
+                if extra:
+                    current = list(grouped.get(mint) or [])
+                    grouped[mint] = current + extra if current else extra
+                    filled += 1
+            if filled:
+                logger.info("dexscreener token-pairs 补齐 %s", filled)
+
+        need = still_need()
         pump = self.providers.get("pumpfun")
         if isinstance(pump, PumpFunProvider) and pump.enabled and need:
             try:
-                quotes = pump.get_token_quotes(need[:80])
-                grouped = merge_quotes(grouped, quotes)
-                logger.info("pump.fun 补齐行情 %s/%s", len(quotes), len(need))
+                apply_quotes("pump.fun", pump.get_token_quotes(need))
             except ProviderError as exc:
                 logger.warning("Pump.fun quotes 失败: %s", exc)
+
+        need = still_need()
+        if isinstance(jup, JupiterProvider) and jup.enabled and need:
+            quotes = []
+            for mint in need:
+                try:
+                    extra = jup.quote_usd_as_market(mint)
+                except ProviderError as exc:
+                    logger.warning("Jupiter swap quote 失败 %s: %s", mint[:8], exc)
+                    extra = None
+                if extra:
+                    quotes.append(extra)
+            apply_quotes("jupiter swap-quote", quotes)
+        still = still_need()
+        if still:
+            logger.info("行情仍缺 %s：%s", len(still), ",".join(item[:8] for item in still[:12]))
         return grouped
 
     def verify_tx(self, wallet: str, mint: str, signature: str):
