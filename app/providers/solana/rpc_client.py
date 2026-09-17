@@ -20,6 +20,12 @@ from app.utils.logger import get_logger
 logger = get_logger("gmgn.solana")
 
 TX_TTL = 10 * 365 * 24 * 3600
+MAX_SUPPORTED_TX_VERSION = 1
+TX_READ_OPTIONS = {
+    "encoding": "jsonParsed",
+    "maxSupportedTransactionVersion": MAX_SUPPORTED_TX_VERSION,
+    "commitment": "confirmed",
+}
 
 
 class SolanaRpcProvider(HttpProviderMixin, DataProvider):
@@ -60,7 +66,7 @@ class SolanaRpcProvider(HttpProviderMixin, DataProvider):
                 return hit
         result = self._call(
             "getTransaction",
-            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+            [signature, dict(TX_READ_OPTIONS)],
         )
         if result and self.cache:
             self.cache.set(self.name, "TRANSACTION_DETAIL", signature, result, TX_TTL)

@@ -39,21 +39,27 @@ class LogPanel(ctk.CTkFrame):
                 pass
 
     def append(self, message: str, level: str = "INFO", *, raw: bool = False) -> None:
-        text = (message or "").rstrip("\n")
-        if "RATE_LIMIT" in text.upper():
-            level = "RATE_LIMIT"
-        if raw or (text.startswith("[") and "] " in text[:16]):
-            line = text + "\n"
-        else:
-            stamp = datetime.now().strftime("%H:%M:%S")
-            line = f"[{stamp}] {level} {text}\n"
-        tag = level if level in LEVEL_COLORS else "INFO"
+        self.append_many([(message, level)], raw=raw)
+
+    def append_many(self, items: list[tuple[str, str]], *, raw: bool = False) -> None:
+        if not items:
+            return
         box = getattr(self.text, "_textbox", self.text)
         self.text.configure(state="normal")
-        try:
-            box.insert("end", line, tag)
-        except Exception:
-            box.insert("end", line)
+        for message, level in items:
+            text = (message or "").rstrip("\n")
+            if "RATE_LIMIT" in text.upper():
+                level = "RATE_LIMIT"
+            if raw or (text.startswith("[") and "] " in text[:16]):
+                line = text + "\n"
+            else:
+                stamp = datetime.now().strftime("%H:%M:%S")
+                line = f"[{stamp}] {level} {text}\n"
+            tag = level if level in LEVEL_COLORS else "INFO"
+            try:
+                box.insert("end", line, tag)
+            except Exception:
+                box.insert("end", line)
         current = int(self.text.index("end-1c").split(".")[0])
         if current > self.max_lines:
             self.text.delete("1.0", f"{current - self.max_lines}.0")

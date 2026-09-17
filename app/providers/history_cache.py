@@ -48,6 +48,9 @@ def swap_to_row(wallet: str, provider: str, swap: WalletSwap, event_index: int =
         },
         "_source": getattr(swap.source, "value", None) or str(swap.source or provider),
         "_total_usd": str(swap.total_value_usd) if swap.total_value_usd is not None else "",
+        "_fee_sol": str((swap.raw or {}).get("_fee_sol") or ""),
+        "_usd_from_sol": bool((swap.raw or {}).get("_usd_from_sol")),
+        "_sol_usd": str((swap.raw or {}).get("_sol_usd") or ""),
     }
 
 
@@ -92,7 +95,13 @@ def row_to_swap(row: dict[str, Any]) -> WalletSwap:
         sold=sold,
         total_value_usd=usd,
         source=src,
-        raw={"cached": True, "fingerprint": row.get("fingerprint")},
+        raw={
+            "cached": True,
+            "fingerprint": row.get("fingerprint"),
+            "_fee_sol": extra.get("_fee_sol") or "",
+            "_usd_from_sol": bool(extra.get("_usd_from_sol")),
+            "_sol_usd": extra.get("_sol_usd") or "",
+        },
     )
 
 

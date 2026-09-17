@@ -62,8 +62,20 @@ class CompletenessService:
             if holding.status == FieldStatus.KNOWN and holding.value is not None
             else holding.export("text")
         )
-        buy_total = safe_export_value(token.buy_total_usd, FieldStatus.KNOWN if token.buy_total_usd is not None else FieldStatus.API_MISSING, kind="usd")
-        sell_total = safe_export_value(token.sell_total_usd, FieldStatus.KNOWN if token.sell_total_usd is not None else FieldStatus.API_MISSING, kind="usd")
+        buy_total = safe_export_value(
+            token.buy_total_usd,
+            FieldStatus.ESTIMATED if getattr(token, "buy_total_estimated", False) and token.buy_total_usd is not None else FieldStatus.KNOWN if token.buy_total_usd is not None else FieldStatus.UNRESOLVED,
+            estimated=bool(getattr(token, "buy_total_estimated", False)),
+            kind="usd",
+            reason="无法验证买入总额",
+        )
+        sell_total = safe_export_value(
+            token.sell_total_usd,
+            FieldStatus.ESTIMATED if getattr(token, "sell_total_estimated", False) and token.sell_total_usd is not None else FieldStatus.KNOWN if token.sell_total_usd is not None else FieldStatus.UNRESOLVED,
+            estimated=bool(getattr(token, "sell_total_estimated", False)),
+            kind="usd",
+            reason="无法验证卖出总额",
+        )
         row = {
             "#": 0,
             "币种": (token.symbol or "").strip() or "未知",
@@ -145,14 +157,24 @@ class CompletenessService:
             "币种": trade.token_symbol or "未知",
             "代币合约": trade.token_address or "未知地址",
             "数量": safe_export_value(trade.token_amount, trade.amount_status, kind="amount"),
-            "USD金额": safe_export_value(trade.cost_usd, trade.cost_usd_status, kind="usd"),
+            "USD金额": safe_export_value(
+                trade.cost_usd,
+                trade.cost_usd_status,
+                estimated=getattr(trade, "cost_usd_estimated", False),
+                kind="usd",
+            ),
             "SOL金额": safe_export_value(
                 trade.cost_sol,
                 FieldStatus.ESTIMATED if trade.cost_sol_estimated else trade.cost_sol_status,
                 estimated=trade.cost_sol_estimated,
                 kind="amount",
             ),
-            "价格USD": safe_export_value(trade.price_usd, FieldStatus.KNOWN if trade.price_usd is not None else FieldStatus.API_MISSING, kind="usd"),
+            "价格USD": safe_export_value(
+                trade.price_usd,
+                FieldStatus.ESTIMATED if getattr(trade, "cost_usd_estimated", False) and trade.price_usd is not None else FieldStatus.KNOWN if trade.price_usd is not None else FieldStatus.API_MISSING,
+                estimated=getattr(trade, "cost_usd_estimated", False),
+                kind="usd",
+            ),
             "Gas USD": safe_export_value(trade.gas_usd, trade.gas_usd_status, kind="usd"),
             "Gas SOL": safe_export_value(trade.gas_sol, trade.gas_sol_status, kind="amount"),
             "单笔盈亏": pnl,

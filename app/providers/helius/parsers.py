@@ -43,6 +43,9 @@ def parse_history_tx(item: Any) -> Optional[HistoryTx]:
                 decimals=int(row["decimals"]) if row.get("decimals") not in (None, "") else None,
             )
         )
+    native = to_decimal(item.get("nativeBalanceChange") or item.get("nativeChange"))
+    if native not in (None, 0) and not any(_mint(c.mint) == "SOL" for c in changes):
+        changes.append(BalanceChange(mint="SOL", amount=native, decimals=9))
     ts = item.get("timestamp") or 0
     try:
         ts_i = int(ts) if ts not in (None, "") else 0
@@ -135,12 +138,13 @@ def _quote_leg_from_changes(tx: HistoryTx, token_mint: str) -> SwapLeg:
     return SwapLeg(address=address, symbol=symbol, amount=abs(amt))
 
 
-def history_to_swaps(wallet: str, txs: list[HistoryTx]) -> list[WalletSwap]:
+def history_to_swaps(wallet: str, txs: list[HistoryTx], sol_usd: Decimal | None = None) -> list[WalletSwap]:
     from app.resolvers.historical_price import enrich_swap_usd
 
     swaps: list[WalletSwap] = []
     for tx in txs:
         mints = {c.mint for c in tx.balance_changes if c.mint and c.mint not in QUOTE_MINTS and c.mint != "SOL"}
+        fee = _fee_as_sol(tx.fee_sol)
         for mint in mints:
             kind = classify_token_event(tx, mint)
             if kind not in {"buy", "sell", "transfer_in", "transfer_out"}:
@@ -152,6 +156,9 @@ def history_to_swaps(wallet: str, txs: list[HistoryTx]) -> list[WalletSwap]:
                 bought, sold = token_leg, quote_leg
             else:
                 bought, sold = quote_leg, token_leg
+            raw = dict(tx.raw or {})
+            if fee is not None:
+                raw["_fee_sol"] = str(fee)
             swap = WalletSwap(
                 transaction_hash=tx.signature,
                 transaction_type=kind,
@@ -160,10 +167,20 @@ def history_to_swaps(wallet: str, txs: list[HistoryTx]) -> list[WalletSwap]:
                 bought=bought,
                 sold=sold,
                 source=DataSource.HELIUS,
-                raw=tx.raw,
+                raw=raw,
             )
-            swaps.append(enrich_swap_usd(swap))
+            swaps.append(enrich_swap_usd(swap, sol_usd=sol_usd))
     return swaps
+
+
+def _fee_as_sol(value) -> Decimal | None:
+    fee = to_decimal(value)
+    if fee is None:
+        return None
+    fee = abs(fee)
+    if fee >= 1:
+        return fee / Decimal("1000000000")
+    return fee
 
 
 def history_event_type(kind: str) -> EventType:

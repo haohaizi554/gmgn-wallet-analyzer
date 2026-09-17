@@ -45,7 +45,7 @@ def collect_rpc_fallback(
     start_ts: int = 0,
     end_ts: int = 0,
     max_signatures: int = 400,
-    max_tx_verify: int = 40,
+    max_tx_verify: int = 250,
 ) -> WalletHistoryIndex:
     """Two-phase: wallet signatures in report window, then limited ATA first-activity."""
     sigs = _collect_wallet_signatures(rpc, wallet, start_ts=start_ts, end_ts=end_ts, limit=max_signatures)

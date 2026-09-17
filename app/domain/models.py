@@ -150,6 +150,7 @@ class TradeRecord:
     gas_usd_status: FieldStatus = FieldStatus.API_MISSING
     gas_sol_status: FieldStatus = FieldStatus.API_MISSING
     cost_sol_estimated: bool = False
+    cost_usd_estimated: bool = False
     in_report_range: bool = True
     history_only: bool = False
     single_pnl_display: str = "未实现"
@@ -318,6 +319,8 @@ class TokenAnalysisResult:
     balance_verify_status: str = "UNRESOLVED"
     pnl_verify_status: str = "UNRESOLVED"
     audit_rows: list[dict[str, Any]] = field(default_factory=list)
+    buy_total_estimated: bool = False
+    sell_total_estimated: bool = False
 
 
 @dataclass

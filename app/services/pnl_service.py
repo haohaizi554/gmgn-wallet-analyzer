@@ -29,6 +29,7 @@ class FifoResult:
     missing_cost_usd: Optional[Decimal]
     current_balance: Decimal
     last_sell_ts: Optional[int]
+    remaining_cost_usd: Optional[Decimal] = None
 
 
 def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
@@ -120,6 +121,15 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
         trade.single_pnl_display = "未实现"
 
     balance = sum((lot.amount for lot in lots), Decimal("0"))
+    remaining_cost = Decimal("0")
+    remaining_known = True
+    for lot in lots:
+        if lot.amount <= 0:
+            continue
+        if lot.known_cost and lot.cost_usd is not None:
+            remaining_cost += lot.cost_usd
+        else:
+            remaining_known = False
     return FifoResult(
         trades=ordered,
         realized_profit=realized if has_verified_sell else None,
@@ -129,4 +139,5 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
         missing_cost_usd=missing_usd if has_missing_usd else None,
         current_balance=balance,
         last_sell_ts=last_sell,
+        remaining_cost_usd=remaining_cost if remaining_known else None,
     )

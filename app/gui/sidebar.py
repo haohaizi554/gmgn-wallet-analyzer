@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from app.gui.theme import MUTED, PRIMARY, PRIMARY_HOVER, PRIMARY_SOFT, TEXT, font
-from app.version import APP_NAME
+from app.gui.theme import PRIMARY_HOVER, font
 
 
 NAV_ITEMS = [
@@ -17,28 +16,37 @@ NAV_ITEMS = [
 
 class Sidebar(ctk.CTkFrame):
     def __init__(self, master, on_select, **kwargs):
-        super().__init__(master, width=188, fg_color="#0F766E", corner_radius=0, **kwargs)
+        super().__init__(master, width=124, fg_color="#0F766E", corner_radius=0, **kwargs)
         self.on_select = on_select
         self.pack_propagate(False)
-        ctk.CTkLabel(self, text=APP_NAME, font=font(15, "bold"), text_color="#ECFDF5", wraplength=160, justify="left").pack(fill="x", padx=16, pady=(22, 18))
         self.buttons: dict[str, ctk.CTkButton] = {}
-        for key, label in NAV_ITEMS:
+        for idx, (key, label) in enumerate(NAV_ITEMS):
             btn = ctk.CTkButton(
                 self,
                 text=label,
                 anchor="w",
+                height=36,
                 fg_color="transparent",
                 hover_color=PRIMARY_HOVER,
                 text_color="#ECFDF5",
-                font=font(14),
+                font=font(13),
                 command=lambda k=key: self.select(k),
             )
-            btn.pack(fill="x", padx=10, pady=3)
+            btn.pack(fill="x", padx=6, pady=(8, 2) if idx == 0 else 2)
             self.buttons[key] = btn
-        ctk.CTkLabel(self, text="多数据源  ·  链上可验证", font=font(11), text_color="#99F6E4").pack(side="bottom", pady=16)
+        ctk.CTkLabel(
+            self,
+            text="多数据源\n链上可验证",
+            font=font(10),
+            text_color="#99F6E4",
+            justify="center",
+        ).pack(side="bottom", pady=12)
         self.highlight("analysis")
 
     def highlight(self, key: str) -> None:
+        if getattr(self, "_current", None) == key:
+            return
+        self._current = key
         for item, btn in self.buttons.items():
             btn.configure(fg_color=PRIMARY_HOVER if item == key else "transparent")
 

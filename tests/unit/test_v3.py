@@ -256,6 +256,22 @@ class JobWalletIdTests(unittest.TestCase):
         self.assertEqual(len({r["id"] for r in rows}), 3)
 
 
+class HistoryDeleteTests(unittest.TestCase):
+    def test_delete_job_and_report_rows(self):
+        db = _db()
+        repos = Repositories(db)
+        job_id = "JOB-DEL"
+        repos.save_job(job_id, ["7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV"], "single", "SUCCESS", {"token_count": 1}, "a.xlsx", 1.0)
+        repos.save_report("R1", "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", "sol", "7d", 0, 1, "SUCCESS", {}, "a.xlsx", "a.json", 1.0, job_id=job_id)
+        self.assertEqual(len(repos.list_jobs()), 1)
+        self.assertEqual(len(repos.list_reports()), 1)
+        repos.delete_report("R1")
+        self.assertEqual(len(repos.list_reports()), 0)
+        self.assertEqual(len(repos.list_jobs()), 1)
+        repos.delete_job(job_id)
+        self.assertEqual(len(repos.list_jobs()), 0)
+
+
 class RawJsonTests(unittest.TestCase):
     def test_100_threads_unique_files(self):
         job = f"JOB-{uuid.uuid4().hex[:8]}"

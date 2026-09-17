@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from decimal import Decimal
+from typing import Any, Optional
 
 from app.domain.enums import ProviderCapability, ProviderHealth
 from app.providers.base import DataProvider, IndependentRateLimiter
@@ -73,6 +74,27 @@ class DexScreenerProvider(HttpProviderMixin, DataProvider):
                 for mint in chunk:
                     self.cache.set(self.name, "TOKEN_POOLS", mint, by_mint.get(mint, []), POOL_TTL)
         return dict(grouped)
+
+    def get_sol_usd(self) -> Optional[Decimal]:
+        pairs = self.get_token_pairs("So11111111111111111111111111111111111111112")
+        best: tuple[Decimal, Decimal] | None = None
+        for pair in pairs:
+            price = pair.price_usd
+            if price is None or price <= 0:
+                continue
+            quote = (pair.quote_symbol or "").upper()
+            base = (pair.base_symbol or "").upper()
+            if quote not in {"USDC", "USDT"} and base not in {"SOL", "WSOL"}:
+                continue
+            liq = pair.liquidity_usd or Decimal("0")
+            if best is None or liq > best[0]:
+                best = (liq, price)
+        if best:
+            return best[1]
+        for pair in pairs:
+            if pair.price_usd and pair.price_usd > 0:
+                return pair.price_usd
+        return None
 
     def test_connection(self) -> dict[str, Any]:
         pairs = self.get_token_pairs("So11111111111111111111111111111111111111112")

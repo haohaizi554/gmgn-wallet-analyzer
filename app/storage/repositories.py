@@ -208,6 +208,13 @@ class Repositories:
             result.append(item)
         return result
 
+    def delete_job(self, job_id: str) -> None:
+        if not job_id:
+            return
+        self.db.execute("DELETE FROM analysis_jobs WHERE job_id=?", (job_id,))
+        self.db.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+        self.db.execute("DELETE FROM wallet_tasks WHERE job_id=?", (job_id,))
+
     def save_token_info(self, chain: str, token: str, payload: dict[str, Any]) -> None:
         self.db.execute(
             """
@@ -439,6 +446,11 @@ class Repositories:
             item["summary"] = json.loads(row["summary_json"]) if row["summary_json"] else {}
             result.append(item)
         return result
+
+    def delete_report(self, report_id: str) -> None:
+        if not report_id:
+            return
+        self.db.execute("DELETE FROM wallet_reports WHERE id=?", (report_id,))
 
     def get_provider_cache(self, key: str) -> Optional[Any]:
         import json

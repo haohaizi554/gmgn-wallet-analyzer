@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import queue
 import threading
 from datetime import datetime, timedelta
@@ -11,12 +12,14 @@ import customtkinter as ctk
 from app.domain.enums import EventType, ReportPeriod, TaskStatus
 from app.domain.models import AnalysisOptions, WalletAnalysisRequest, WalletReport
 from app.gui.components.data_table import DataTable
+from app.gui.components.option_drawer import OptionDrawer
 from app.gui.components.progress_panel import ProgressPanel
 from app.gui.components.stat_card import StatCard
-from app.gui.theme import BG, DANGER, MUTED, PANEL, PRIMARY, SUCCESS, TEXT, WARN, font
+from app.gui.theme import BG, DANGER, MUTED, PANEL, PRIMARY, TEXT, font
 from app.gui.worker import AnalysisWorker
+from app.services.completeness_service import CompletenessService
 from app.utils.time_utils import LOCAL_TZ, format_elapsed, period_window
-from app.utils.validators import parse_wallet_lines, short_address, summarize_wallet_input, summarize_wallet_input
+from app.utils.validators import parse_wallet_lines, short_address, summarize_wallet_input
 
 
 EXAMPLE_WALLET = "7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV"
@@ -86,34 +89,36 @@ class AnalysisPage(ctk.CTkFrame):
         left = ctk.CTkFrame(self, width=320, fg_color=PANEL, corner_radius=0)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
+        form = ctk.CTkScrollableFrame(left, fg_color=PANEL, corner_radius=0)
+        form.pack(fill="both", expand=True)
         right = ctk.CTkFrame(self, fg_color=BG)
         right.pack(side="left", fill="both", expand=True)
 
-        ctk.CTkLabel(left, text="钱包地址", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
-        self.wallet_text = ctk.CTkTextbox(left, height=110, font=font(13))
+        ctk.CTkLabel(form, text="钱包地址", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
+        self.wallet_text = ctk.CTkTextbox(form, height=110, font=font(13))
         self.wallet_text.pack(fill="x", padx=16)
         self.wallet_text.bind("<KeyRelease>", lambda _e: self._refresh_wallet_stats())
-        self.wallet_error = ctk.CTkLabel(left, text="", text_color=DANGER, font=font(11), anchor="w")
+        self.wallet_error = ctk.CTkLabel(form, text="", text_color=DANGER, font=font(11), anchor="w")
         self.wallet_error.pack(fill="x", padx=16)
-        self.wallet_count = ctk.CTkLabel(left, text="有效钱包：0  重复：0  无效：0", font=font(11), text_color=MUTED, anchor="w")
+        self.wallet_count = ctk.CTkLabel(form, text="有效钱包：0  重复：0  无效：0", font=font(11), text_color=MUTED, anchor="w")
         self.wallet_count.pack(fill="x", padx=16)
-        self.mode_label = ctk.CTkLabel(left, text="模式：单钱包", font=font(11), text_color=MUTED, anchor="w")
+        self.mode_label = ctk.CTkLabel(form, text="模式：单钱包", font=font(11), text_color=MUTED, anchor="w")
         self.mode_label.pack(fill="x", padx=16)
-        btns = ctk.CTkFrame(left, fg_color="transparent")
+        btns = ctk.CTkFrame(form, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=6)
         ctk.CTkButton(btns, text="从文件导入", width=90, height=28, command=self._import_file).pack(side="left")
         ctk.CTkButton(btns, text="粘贴示例", width=80, height=28, fg_color="#E5E7EB", text_color=TEXT, command=self._paste_example).pack(side="left", padx=6)
         ctk.CTkButton(btns, text="清空", width=60, height=28, fg_color="#E5E7EB", text_color=TEXT, command=lambda: self.wallet_text.delete("1.0", "end")).pack(side="left")
 
-        ctk.CTkLabel(left, text="时间范围", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(10, 6))
-        period_bar = ctk.CTkFrame(left, fg_color="transparent")
+        ctk.CTkLabel(form, text="时间范围", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(10, 6))
+        period_bar = ctk.CTkFrame(form, fg_color="transparent")
         period_bar.pack(fill="x", padx=16)
         self.period_buttons = {}
-        for key, label in [(ReportPeriod.D7, "最近 7 天"), (ReportPeriod.D30, "最近 30 天"), (ReportPeriod.D90, "最近 90 天"), (ReportPeriod.ALL, "全部交易"), (ReportPeriod.CUSTOM, "自定义")]:
-            btn = ctk.CTkButton(period_bar, text=label, height=28, width=88, command=lambda k=key: self._set_period(k))
-            btn.pack(side="left", padx=2, pady=2)
+        for key, label in [(ReportPeriod.D7, "最近 7 天"), (ReportPeriod.D30, "最近 30 天")]:
+            btn = ctk.CTkButton(period_bar, text=label, height=28, command=lambda k=key: self._set_period(k))
+            btn.pack(side="left", expand=True, fill="x", padx=2)
             self.period_buttons[key] = btn
-        date_row = ctk.CTkFrame(left, fg_color="transparent")
+        date_row = ctk.CTkFrame(form, fg_color="transparent")
         date_row.pack(fill="x", padx=16, pady=6)
         self.start_var = ctk.StringVar()
         self.end_var = ctk.StringVar()
@@ -123,55 +128,39 @@ class AnalysisPage(ctk.CTkFrame):
         ctk.CTkEntry(date_row, textvariable=self.end_var, width=130).grid(row=1, column=1)
         self._set_period(ReportPeriod.D7)
 
-        ctk.CTkLabel(left, text="高级选项", font=font(14, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=16, pady=(8, 4))
-        opt = ctk.CTkFrame(left, fg_color="transparent")
-        opt.pack(fill="x", padx=16)
-        self.max_tx = ctk.CTkEntry(opt, width=80)
-        self.max_tx.insert(0, "2500")
-        ctk.CTkLabel(opt, text="每钱包交易上限", font=font(12), text_color=MUTED).grid(row=0, column=0, sticky="w")
-        self.max_tx.grid(row=0, column=1, padx=8)
         self.opt_created = ctk.BooleanVar(value=True)
         self.opt_platform = ctk.BooleanVar(value=True)
         self.opt_transfer = ctk.BooleanVar(value=True)
         self.opt_fill = ctk.BooleanVar(value=True)
         self.opt_raw = ctk.BooleanVar(value=True)
         self.opt_pump = ctk.BooleanVar(value=False)
-        for var, label in [
-            (self.opt_created, "获取 Token 创建时间"),
-            (self.opt_platform, "获取来源平台/池子"),
-            (self.opt_transfer, "识别 Transfer / Bridge"),
-            (self.opt_fill, "自动补齐缺失字段"),
-            (self.opt_raw, "保存原始 API JSON"),
-            (self.opt_pump, "仅分析 Pump.fun Token"),
-        ]:
-            ctk.CTkCheckBox(left, text=label, variable=var, font=font(12)).pack(anchor="w", padx=16, pady=2)
+        self.max_tx_var = ctk.StringVar(value="2500")
+        self.adv_drawer = OptionDrawer(form, title="高级选项", summary="5 项开启 · 上限 2500")
+        self.adv_drawer.trigger.configure(command=self._toggle_advanced)
+        self.adv_drawer.trigger.pack(fill="x", padx=16, pady=(10, 0))
+        self._adv_built = False
+        for var in (
+            self.opt_created,
+            self.opt_platform,
+            self.opt_transfer,
+            self.opt_fill,
+            self.opt_raw,
+            self.opt_pump,
+        ):
+            var.trace_add("write", lambda *_a: self._refresh_adv_summary())
+        self.max_tx_var.trace_add("write", lambda *_a: self._refresh_adv_summary())
 
-        start_bar = ctk.CTkFrame(left, fg_color="transparent")
+        start_bar = ctk.CTkFrame(form, fg_color="transparent")
         start_bar.pack(fill="x", padx=16, pady=12)
         self.start_btn = ctk.CTkButton(start_bar, text="开始分析", height=36, command=self.start_analysis)
         self.start_btn.pack(side="left", expand=True, fill="x")
         self.stop_btn = ctk.CTkButton(start_bar, text="停止", height=36, fg_color=DANGER, width=80, command=self.stop_analysis, state="disabled")
         self.stop_btn.pack(side="left", padx=(8, 0))
-        self.progress = ProgressPanel(left)
+        self.progress = ProgressPanel(form)
         self.progress.pack(fill="x", padx=12, pady=(0, 12))
 
-        header = ctk.CTkFrame(right, fg_color=PANEL)
-        header.pack(fill="x", padx=12, pady=12)
-        self.title_label = ctk.CTkLabel(header, text="分析任务", font=font(20, "bold"), text_color=TEXT, anchor="w")
-        self.title_label.pack(fill="x", padx=16, pady=(12, 0))
-        self.meta_label = ctk.CTkLabel(header, text="Job：-    状态：等待分析    耗时：-", font=font(13), text_color=MUTED, anchor="w")
-        self.meta_label.pack(fill="x", padx=16, pady=(4, 0))
-        self.job_summary = ctk.CTkLabel(header, text="钱包 0/0 · Token 0/0 · Keys - · 429 0 · 缓存 -", font=font(12), text_color=MUTED, anchor="w")
-        self.job_summary.pack(fill="x", padx=16, pady=(2, 4))
-        self.key_status = ctk.CTkLabel(header, text="API Keys：未加载", font=font(12), text_color=MUTED, anchor="w", justify="left")
-        self.key_status.pack(fill="x", padx=16, pady=(0, 4))
-        self.source_status = ctk.CTkLabel(header, text="Data Sources：等待任务", font=font(12), text_color=MUTED, anchor="w", justify="left")
-        self.source_status.pack(fill="x", padx=16, pady=(0, 8))
-        self.rate_banner = ctk.CTkLabel(header, text="", font=font(12), text_color=WARN, anchor="w")
-        self.rate_banner.pack(fill="x", padx=16, pady=(0, 8))
-
         cards = ctk.CTkFrame(right, fg_color="transparent")
-        cards.pack(fill="x", padx=12)
+        cards.pack(fill="x", padx=12, pady=(12, 0))
         self.cards = {}
         for key, title in [
             ("tokens", "代币总数"),
@@ -202,7 +191,8 @@ class AnalysisPage(ctk.CTkFrame):
                 ("elapsed", "耗时", 70),
             ],
         )
-        self.wallet_table.pack(fill="x", padx=12)
+        self.wallet_table.pack(fill="x", padx=12, pady=(8, 0))
+        self.wallet_table.tree.configure(height=6)
         self.wallet_table.tree.bind("<Double-1>", lambda _e: self._select_wallet_row())
 
         tabs = ctk.CTkTabview(right)
@@ -238,30 +228,85 @@ class AnalysisPage(ctk.CTkFrame):
         self.raw_box = ctk.CTkTextbox(self.raw_tab, font=font(12))
         self.raw_box.pack(fill="both", expand=True, padx=8, pady=8)
         self._wallet_rows: dict[str, dict] = {}
-        self._refresh_keys()
+        self._pending_report: Optional[WalletReport] = None
+        self._last_keys_ts = 0.0
+        self._complete = CompletenessService()
+        self._refresh_keys(force=True)
 
     def _refresh_wallet_stats(self) -> None:
         stats = summarize_wallet_input(self.wallet_text.get("1.0", "end"))
         self.wallet_count.configure(text=f"有效钱包：{stats['valid']}  重复：{stats['duplicate']}  无效：{stats['invalid']}")
         self.mode_label.configure(text="模式：批量任务" if stats["valid"] > 1 else "模式：单钱包")
 
-    def _refresh_keys(self) -> None:
+    def _toggle_advanced(self) -> None:
+        if self.adv_drawer.is_open():
+            self.adv_drawer.close()
+            return
+        if not self._adv_built:
+            self.adv_drawer._ensure_popup()
+            self._build_advanced_drawer()
+            self._adv_built = True
+        self.adv_drawer.open()
+
+    def _build_advanced_drawer(self) -> None:
+        body = self.adv_drawer.body
+        assert body is not None
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(row, text="每钱包交易上限", font=font(12), text_color=MUTED).pack(side="left")
+        self.max_tx = ctk.CTkEntry(row, width=80, height=28, textvariable=self.max_tx_var)
+        self.max_tx.pack(side="right")
+        for var, label in [
+            (self.opt_created, "获取 Token 创建时间"),
+            (self.opt_platform, "获取来源平台/池子"),
+            (self.opt_transfer, "识别 Transfer / Bridge"),
+            (self.opt_fill, "自动补齐缺失字段"),
+            (self.opt_raw, "保存原始 API JSON"),
+            (self.opt_pump, "仅分析 Pump.fun Token"),
+        ]:
+            ctk.CTkCheckBox(body, text=label, variable=var, font=font(12)).pack(anchor="w", pady=2)
+        self._refresh_adv_summary()
+
+    def _refresh_adv_summary(self) -> None:
+        enabled = sum(
+            1
+            for var in (
+                self.opt_created,
+                self.opt_platform,
+                self.opt_transfer,
+                self.opt_fill,
+                self.opt_raw,
+                self.opt_pump,
+            )
+            if var.get()
+        )
+        limit = (self.max_tx_var.get() or "2500").strip() or "2500"
+        self.adv_drawer.set_summary(f"{enabled} 项开启 · 上限 {limit}")
+
+    def _refresh_keys(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_keys_ts < 1.0:
+            return
+        self._last_keys_ts = now
         try:
             items = self.app.credentials.snapshot()
         except Exception:
             items = []
         if not items:
-            self.key_status.configure(text="API Keys：未配置")
+            self.progress.set_keys("Keys：未配置")
+            self.app.set_key_status("Keys：未配置")
             return
         healthy = sum(1 for i in items if i["state"] == "HEALTHY")
         cooldown = sum(1 for i in items if i["state"] in ("RATE_LIMITED", "COOLDOWN"))
-        lines = [f"API Keys：{healthy} Healthy / {cooldown} Cooldown"]
+        summary = f"Keys：{healthy} Healthy / {cooldown} Cooldown"
+        self.progress.set_keys(summary)
+        parts = [summary]
         for item in items:
-            extra = f"利用率：{int((item.get('utilization') or 0)*100)}% inflight：{item.get('inflight') or 0}"
-            if item["state"] in ("RATE_LIMITED", "COOLDOWN") and item.get("cooldown_until"):
-                extra = f"恢复：{int(item['cooldown_until'])}"
-            lines.append(f"{item['masked']}  状态：{item['state']}  {extra}")
-        self.key_status.configure(text="\n".join(lines))
+            extra = f"{int((item.get('utilization') or 0)*100)}%"
+            if item["state"] in ("RATE_LIMITED", "COOLDOWN"):
+                extra = "冷却中"
+            parts.append(f"{item['masked']} {item['state']} {extra}")
+        self.app.set_key_status(" · ".join(parts))
 
     def _append_run_log(self, text: str) -> None:
         try:
@@ -274,12 +319,13 @@ class AnalysisPage(ctk.CTkFrame):
         sel = self.wallet_table.tree.selection()
         if not sel:
             return
-        values = self.wallet_table.tree.item(sel[0], "values")
-        if not values:
-            return
-        short = values[0]
+        row = self.wallet_table.row_by_id(sel[0])
+        wallet = (row or {}).get("_copy") or (row or {}).get("_id")
+        if not wallet:
+            values = self.wallet_table.tree.item(sel[0], "values")
+            wallet = values[0] if values else ""
         for report in self.reports:
-            if short_address(report.request.wallet_address) == short or report.request.wallet_address.startswith(str(short).split("...")[0]):
+            if report.request.wallet_address == wallet or short_address(report.request.wallet_address) == wallet:
                 self.render_report(report)
                 return
 
@@ -288,16 +334,7 @@ class AnalysisPage(ctk.CTkFrame):
         for key, btn in self.period_buttons.items():
             btn.configure(fg_color=PRIMARY if key == period else "#E5E7EB", text_color="#FFFFFF" if key == period else TEXT)
         now = datetime.now(tz=LOCAL_TZ)
-        if period == ReportPeriod.D7:
-            start = now - timedelta(days=7)
-        elif period == ReportPeriod.D30:
-            start = now - timedelta(days=30)
-        elif period == ReportPeriod.D90:
-            start = now - timedelta(days=90)
-        elif period == ReportPeriod.ALL:
-            start = datetime(2020, 1, 1, tzinfo=LOCAL_TZ)
-        else:
-            start = now - timedelta(days=7)
+        start = now - timedelta(days=30 if period == ReportPeriod.D30 else 7)
         self.start_var.set(start.strftime("%Y-%m-%d"))
         self.end_var.set(now.strftime("%Y-%m-%d"))
 
@@ -314,6 +351,7 @@ class AnalysisPage(ctk.CTkFrame):
         self.wallet_text.insert("1.0", EXAMPLE_WALLET)
 
     def start_analysis(self) -> None:
+        self.adv_drawer.close()
         self._refresh_wallet_stats()
         wallets, errors = parse_wallet_lines(self.wallet_text.get("1.0", "end"))
         stats = summarize_wallet_input(self.wallet_text.get("1.0", "end"))
@@ -344,7 +382,7 @@ class AnalysisPage(ctk.CTkFrame):
             save_raw_json=self.opt_raw.get(),
             pumpfun_only=self.opt_pump.get(),
         )
-        max_tx = int(self.max_tx.get() or 2500)
+        max_tx = int(self.max_tx_var.get() or 2500)
         requests = [
             WalletAnalysisRequest(
                 wallet_address=w,
@@ -371,15 +409,20 @@ class AnalysisPage(ctk.CTkFrame):
         )
         self.job_id = self.worker.job_id
         self.reports = []
+        self.current = None
+        self._pending_report = None
+        self._rendered_key = None
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        mode = "单钱包" if len(wallets) == 1 else f"批量任务 · {len(wallets)} 个钱包"
-        self.title_label.configure(text=f"分析任务（{mode}）")
-        self.meta_label.configure(text=f"Job：{self.job_id[:8]}    状态：RUNNING    钱包：0/{len(wallets)}")
-        self.job_summary.configure(text=f"钱包 0/{len(wallets)} · Token 0/0 · 429 0 · 缓存 -")
+        mode = "单钱包" if len(wallets) == 1 else f"批量 · {len(wallets)} 钱包"
+        self.app.set_job_status(f"任务：{self.job_id[:8]} · RUNNING · {mode}")
+        self.progress.set_sources("数据源：运行中")
+        self.app.set_source_status("数据源：运行中")
+        self.progress.update_progress(f"开始分析 · {mode}", 0, len(wallets), wallets[0], "")
         self.wallet_table.set_rows(
             [
                 {
+                    "_id": w,
                     "wallet": short_address(w),
                     "state": "QUEUED",
                     "tokens": 0,
@@ -395,8 +438,7 @@ class AnalysisPage(ctk.CTkFrame):
                 for w in wallets
             ]
         )
-        self._refresh_keys()
-        self.progress.update_progress("开始分析", 0, 0, wallets[0], "")
+        self._refresh_keys(force=True)
         self._append_run_log(f"JOB_STARTED {self.job_id} {mode}")
         self.app.log_panel.append(f"开始分析 Job {self.job_id[:8]} {mode} {', '.join(short_address(w) for w in wallets)}")
         self.worker.start()
@@ -405,62 +447,137 @@ class AnalysisPage(ctk.CTkFrame):
         self.cancel_event.set()
         self.app.log_panel.append("已请求停止，等待当前请求安全退出", "WARNING")
 
+    def _patch_wallet(self, wallet: str, **fields) -> None:
+        if not wallet:
+            return
+        payload = {"_id": wallet, "_copy": wallet, "wallet": short_address(wallet)}
+        payload.update(fields)
+        self.wallet_table.upsert_row(payload)
+
     def handle_message(self, msg: dict) -> None:
         jid = msg.get("job_id")
         if jid and self.job_id and jid != self.job_id:
             return
         kind = msg.get("type")
-        self._refresh_keys()
-        if kind in ("progress", "WALLET_STARTED", "WALLET_WAITING_API", "RATE_LIMITED", "KEY_RECOVERED", "wallet_done"):
-            self._append_run_log(f"{kind} {msg.get('wallet') or ''} {msg.get('message') or ''}".strip())
+        wallet = str(msg.get("wallet") or "")
+        if kind in ("WALLET_WAITING_API", "RATE_LIMITED", "KEY_RECOVERED"):
+            self._refresh_keys(force=True)
+        if kind in ("WALLET_STARTED", "WALLET_WAITING_API", "RATE_LIMITED", "KEY_RECOVERED", "wallet_done"):
+            self._append_run_log(f"{kind} {wallet} {msg.get('message') or ''}".strip())
         if kind == "progress":
             self.progress.update_progress(
                 msg.get("message", ""),
                 int(msg.get("done") or 0),
                 int(msg.get("total") or 0),
-                short_address(msg.get("wallet") or ""),
+                short_address(wallet),
                 short_address(msg.get("token") or ""),
             )
+            self._patch_wallet(
+                wallet,
+                state="RUNNING",
+                done=int(msg.get("done") or 0),
+                tokens=int(msg.get("total") or 0),
+                stage=str(msg.get("stage") or "RUNNING"),
+            )
         elif kind == "api_state":
-            self.progress.api_label.configure(text=str(msg.get("state") or "API 正常"))
-            self.app.set_api_status(str(msg.get("state") or "API 正常"))
+            text = str(msg.get("state") or "API 正常")
+            self.progress.set_api(text)
+            self.app.set_api_status(text)
+        elif kind == "WALLET_STARTED":
+            self._patch_wallet(wallet, state="RUNNING", stage="STARTED")
         elif kind in ("WALLET_WAITING_API", "RATE_LIMITED"):
             text = msg.get("message") or "API 限流，等待恢复"
-            self.rate_banner.configure(text=text, text_color=WARN)
-            self.progress.api_label.configure(text=text)
+            self.progress.set_api(text)
             self.app.set_api_status(text)
+            self._patch_wallet(wallet, state="WAITING_API", stage="API Cooldown")
             self.app.log_panel.append(text, "WARNING")
         elif kind == "KEY_RECOVERED":
-            self.rate_banner.configure(text="Key 已恢复，任务继续")
+            self.progress.set_api("Key 已恢复，任务继续")
+            self.app.set_api_status("API 正常")
+            self._patch_wallet(wallet, state="RUNNING", stage="RESUMED")
             self.app.log_panel.append("Key 已恢复", "SUCCESS")
         elif kind == "PROVIDER_HEALTH":
-            self.source_status.configure(text="Data Sources：" + (msg.get("message") or ""))
-            self._append_run_log(msg.get("message") or "")
+            text = msg.get("message") or "数据源：运行中"
+            self.progress.set_sources(text)
+            self.app.set_source_status(text)
+            self._append_run_log(text)
         elif kind == "wallet_done":
             report: WalletReport = msg["report"]
             self.reports.append(report)
-            self.render_report(report)
-            self.app.log_panel.append(f"{report.status.value} {short_address(report.request.wallet_address)} 完成，Excel={report.excel_path}", "SUCCESS" if report.status.value == "SUCCESS" else "WARNING")
+            self._patch_wallet_from_report(report)
+            self.app.mark_history_dirty()
+            self.app.log_panel.append(
+                f"{report.status.value} {short_address(report.request.wallet_address)} 完成，Excel={report.excel_path}",
+                "SUCCESS" if report.status.value == "SUCCESS" else "WARNING",
+            )
+            showing = self.current is None or self.current.request.wallet_address == report.request.wallet_address
+            if showing:
+                self._apply_or_defer_report(report)
         elif kind in ("done", "cancelled", "error"):
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
+            self._refresh_keys(force=True)
             reports = msg.get("reports") or self.reports
             if reports:
-                self.render_report(reports[-1])
+                self._apply_or_defer_report(reports[-1])
+            self.app.mark_history_dirty()
             if kind == "cancelled":
-                self.meta_label.configure(text=self.meta_label.cget("text").replace("分析完成", "已取消") if "分析完成" in self.meta_label.cget("text") else "状态：已取消")
+                self.progress.update_progress("已取消", 0, 0)
+                self.app.set_job_status("任务：已取消")
                 self.app.log_panel.append("分析已取消", "WARNING")
             elif kind == "error":
+                self.progress.update_progress("分析失败", 0, 0)
+                self.app.set_job_status("任务：失败")
                 self.app.log_panel.append(msg.get("message") or "分析失败", "ERROR")
                 messagebox.showerror("分析失败", msg.get("message") or "未知错误")
             else:
-                self.rate_banner.configure(text="")
+                self.progress.set_api("API 正常")
+                self.app.set_job_status("任务：已完成")
                 self.app.log_panel.append("全部任务完成", "SUCCESS")
 
+    def _apply_or_defer_report(self, report: WalletReport) -> None:
+        if getattr(self.app, "active_page", lambda: "analysis")() != "analysis":
+            self._pending_report = report
+            return
+        self.render_report(report)
+
+    def _patch_wallet_from_report(self, report: WalletReport) -> None:
+        wallet = report.request.wallet_address
+        stats = report.api_stats
+        self._patch_wallet(
+            wallet,
+            state=report.status.value,
+            tokens=getattr(report.summary, "token_count", 0) or 0,
+            done=getattr(report.summary, "token_count", 0) or 0,
+            stage="DONE",
+            reqs=getattr(stats, "requests", 0) or 0,
+            rl=getattr(stats, "retries_429", 0) or 0,
+            cache=getattr(stats, "cache_hit_rate", "-") or "-",
+            elapsed=format_elapsed(report.elapsed_seconds),
+        )
+
     def render_report(self, report: WalletReport) -> None:
+        render_key = (
+            report.request.wallet_address,
+            report.status.value,
+            len(report.tokens),
+            len(report.trades),
+            str(report.excel_path or ""),
+        )
+        if render_key == getattr(self, "_rendered_key", None):
+            self._patch_wallet_from_report(report)
+            return
+        self._rendered_key = render_key
         self.current = report
-        self.meta_label.configure(
-            text=f"钱包：{short_address(report.request.wallet_address)}    状态：{report.status.value}    耗时：{format_elapsed(report.elapsed_seconds)}"
+        self.progress.update_progress(
+            f"{report.status.value} · {format_elapsed(report.elapsed_seconds)}",
+            int(getattr(report.summary, "token_count", 0) or 0),
+            int(getattr(report.summary, "token_count", 0) or 0),
+            short_address(report.request.wallet_address),
+            "",
+        )
+        self.app.set_job_status(
+            f"任务：{short_address(report.request.wallet_address)} · {report.status.value} · {format_elapsed(report.elapsed_seconds)}"
         )
         s = report.summary
         self.cards["tokens"].set_value(str(s.token_count))
@@ -471,9 +588,7 @@ class AnalysisPage(ctk.CTkFrame):
         self.cards["gas"].set_value(str(s.gas_total_usd.export("usd_compact")))
         self.cards["special"].set_value(str(s.special_acquisition_count))
         self.cards["missing"].set_value(str(s.missing_cost_count))
-        from app.services.completeness_service import CompletenessService
-
-        complete = CompletenessService()
+        complete = self._complete
         token_rows = []
         for idx, token in enumerate(report.tokens, start=1):
             row = complete.token_export_row(token)
@@ -499,6 +614,7 @@ class AnalysisPage(ctk.CTkFrame):
                 tag = "special" if token.acquisition.acquisition_type.value != "BUY" else ""
             token_rows.append(
                 {
+                    "_id": token.token_address,
                     "idx": idx,
                     "symbol": row["币种"],
                     "address": short_address(token.token_address),
@@ -526,13 +642,15 @@ class AnalysisPage(ctk.CTkFrame):
                 }
             )
         self.token_table.set_rows(token_rows)
-        self.pos_table.set_rows([r for r in token_rows if "仍持仓" in r.get("_filters", "")])
+        pos_rows = [{**r, "_id": f"pos:{r['_id']}"} for r in token_rows if "仍持仓" in r.get("_filters", "")]
+        self.pos_table.set_rows(pos_rows)
         platforms = {t.token_address: str(t.source_platform.export("text")) for t in report.tokens}
         trade_rows = []
-        for tr in report.trades:
+        for idx, tr in enumerate(report.trades):
             row = complete.trade_export_row(tr, platforms.get(tr.token_address, "未知来源"))
             trade_rows.append(
                 {
+                    "_id": f"{tr.tx_hash}:{tr.event_type.value}:{idx}",
                     "time": row["时间"],
                     "type": row["类型"],
                     "symbol": row["币种"],
@@ -556,6 +674,7 @@ class AnalysisPage(ctk.CTkFrame):
         self.pnl_table.set_rows(
             [
                 {
+                    "_id": f"pnl:{t.token_address}",
                     "symbol": t.symbol,
                     "address": short_address(t.token_address),
                     "fifo": t.fifo_realized_profit.export("usd"),
@@ -574,10 +693,13 @@ class AnalysisPage(ctk.CTkFrame):
             bucket["count"] += 1
             bucket["buys"] += token.buy_count
             bucket["sells"] += token.sell_count
-        self.plat_table.set_rows([{"platform": k, "count": v["count"], "buys": v["buys"], "sells": v["sells"]} for k, v in plat_count.items()])
+        self.plat_table.set_rows(
+            [{"_id": k, "platform": k, "count": v["count"], "buys": v["buys"], "sells": v["sells"]} for k, v in plat_count.items()]
+        )
         self.warn_table.set_rows(
             [
                 {
+                    "_id": f"{w.wallet_address}:{w.token_address}:{w.field_name}:{idx}",
                     "wallet": short_address(w.wallet_address),
                     "token": w.token_symbol,
                     "field": w.field_name,
@@ -588,11 +710,13 @@ class AnalysisPage(ctk.CTkFrame):
                     "est": "是" if w.estimated else "否",
                     "_copy": w.token_address,
                 }
-                for w in report.warnings
+                for idx, w in enumerate(report.warnings)
             ]
         )
-        self.raw_box.delete("1.0", "end")
         raw_text = "\n".join(report.raw_paths) if report.raw_paths else "未保存原始 JSON"
-        self.raw_box.insert("1.0", f"Excel: {report.excel_path}\nJSON: {report.json_path}\n请求数: {report.api_stats.requests}\n缓存命中率: {report.api_stats.cache_hit_rate}\n\n原始文件:\n{raw_text}")
+        raw_body = f"Excel: {report.excel_path}\nJSON: {report.json_path}\n请求数: {report.api_stats.requests}\n缓存命中率: {report.api_stats.cache_hit_rate}\n\n原始文件:\n{raw_text}"
+        if getattr(self, "_raw_body", None) != raw_body:
+            self._raw_body = raw_body
+            self.raw_box.delete("1.0", "end")
+            self.raw_box.insert("1.0", raw_body)
         self.app.set_cache_rate(report.api_stats.cache_hit_rate)
-        self.app.refresh_history()

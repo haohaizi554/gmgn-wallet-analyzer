@@ -41,12 +41,13 @@ class AppConfig:
     moralis_api_key: str = ""
     moralis_base: str = "https://solana-gateway.moralis.io"
     helius_api_key: str = ""
+    helius_api_keys: list[str] = field(default_factory=list)
     helius_rpc_url: str = ""
     solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
     verification_mode: str = "BALANCED"
     enable_gmgn_deep_history_fallback: bool = False
     enable_gmgn: bool = True
-    enable_moralis: bool = True
+    enable_moralis: bool = False
     moralis_api_keys: list[str] = field(default_factory=list)
     helius_target_rps: float = 8.0
     helius_monthly_credit_budget: int = 1_000_000
@@ -82,6 +83,29 @@ def _parse_keys(values: dict[str, str]) -> list[str]:
     return ordered
 
 
+def _looks_like_helius_key(key: str) -> bool:
+    text = (key or "").strip()
+    if len(text) != 36:
+        return False
+    parts = text.split("-")
+    if [len(p) for p in parts] != [8, 4, 4, 4, 12]:
+        return False
+    hex_chars = set("0123456789abcdefABCDEF")
+    return all(ch in hex_chars for part in parts for ch in part)
+
+
+def _rehome_helius_keys(moralis_keys: list[str], helius_keys: list[str]) -> tuple[list[str], list[str]]:
+    misplaced = [k for k in moralis_keys if _looks_like_helius_key(k)]
+    if not misplaced:
+        return moralis_keys, helius_keys
+    merged = list(helius_keys)
+    for key in misplaced:
+        if key not in merged:
+            merged.append(key)
+    kept = [k for k in moralis_keys if k not in misplaced]
+    return kept, merged
+
+
 def _parse_named_keys(values: dict[str, str], multi_key: str, single_key: str) -> list[str]:
     multi = (values.get(multi_key) or "").strip()
     keys: list[str] = []
@@ -114,6 +138,8 @@ def load_config() -> AppConfig:
     values = _read_env_file()
     keys = _parse_keys(values)
     moralis_keys = _parse_named_keys(values, "MORALIS_API_KEYS", "MORALIS_API_KEY")
+    helius_keys = _parse_named_keys(values, "HELIUS_API_KEYS", "HELIUS_API_KEY")
+    moralis_keys, helius_keys = _rehome_helius_keys(moralis_keys, helius_keys)
     api_base = (values.get("GMGN_API_BASE") or "https://openapi.gmgn.ai").rstrip("/")
     plan = (values.get("GMGN_PLAN") or "Free").strip() or "Free"
     rate = float(values.get("GMGN_KEY_RATE") or values.get("GMGN_RATE_LIMIT_RATE") or values.get("GMGN_RATE") or 5)
@@ -151,13 +177,14 @@ def load_config() -> AppConfig:
         moralis_api_key=moralis_keys[0] if moralis_keys else "",
         moralis_api_keys=moralis_keys,
         moralis_base=(values.get("MORALIS_API_BASE") or "https://solana-gateway.moralis.io").rstrip("/"),
-        helius_api_key=(values.get("HELIUS_API_KEY") or "").strip(),
+        helius_api_key=helius_keys[0] if helius_keys else "",
+        helius_api_keys=helius_keys,
         helius_rpc_url=(values.get("HELIUS_RPC_URL") or "").strip(),
         solana_rpc_url=(values.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com").rstrip("/"),
         verification_mode=(values.get("VERIFICATION_MODE") or "BALANCED").strip() or "BALANCED",
         enable_gmgn_deep_history_fallback=_truthy(values.get("ENABLE_GMGN_DEEP_HISTORY_FALLBACK"), False),
         enable_gmgn=_truthy(values.get("ENABLE_GMGN"), True),
-        enable_moralis=_truthy(values.get("ENABLE_MORALIS"), True),
+        enable_moralis=bool(moralis_keys) and _truthy(values.get("ENABLE_MORALIS"), True),
         helius_target_rps=float(values.get("HELIUS_TARGET_RPS") or 8),
         helius_monthly_credit_budget=int(values.get("HELIUS_MONTHLY_CREDIT_BUDGET") or 1_000_000),
         helius_api_workers=max(1, min(8, int(values.get("HELIUS_API_WORKERS") or 4))),

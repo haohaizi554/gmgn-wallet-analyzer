@@ -15,7 +15,9 @@ class SettingsPage(ctk.CTkFrame):
     def __init__(self, master, app, **kwargs):
         super().__init__(master, fg_color=BG, **kwargs)
         self.app = app
-        card = ctk.CTkFrame(self, fg_color=PANEL)
+        scroll = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
+        scroll.pack(fill="both", expand=True)
+        card = ctk.CTkFrame(scroll, fg_color=PANEL)
         card.pack(fill="x", padx=24, pady=24)
         ctk.CTkLabel(card, text="系统设置", font=font(20, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(18, 6))
         ctk.CTkLabel(
@@ -71,12 +73,12 @@ class SettingsPage(ctk.CTkFrame):
         self.status = ctk.CTkLabel(btns, text="", font=font(13), text_color=MUTED)
         self.status.pack(side="left", padx=8)
 
-        sources = ctk.CTkFrame(self, fg_color=PANEL)
+        sources = ctk.CTkFrame(scroll, fg_color=PANEL)
         sources.pack(fill="x", padx=24, pady=(0, 24))
         ctk.CTkLabel(sources, text="数据源设置", font=font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(16, 4))
         ctk.CTkLabel(
             sources,
-            text="默认主路径：Moralis（主索引）+ Solana RPC（硬兜底）+ DEX Screener（市场）。GMGN 仅辅助验证。Helius 有 Key 才增强，没有完全正常。",
+            text="没有付费 Moralis 不影响分析。主路径是 Solana RPC（有 Helius Key 时走 Helius RPC）+ DEX Screener。Moralis 仅在有付费 Key 时作为 Swap 主索引；GMGN 只做辅助验证。",
             font=font(12),
             text_color=MUTED,
             anchor="w",
@@ -84,9 +86,14 @@ class SettingsPage(ctk.CTkFrame):
         ).pack(fill="x", padx=20)
         grid = ctk.CTkFrame(sources, fg_color="transparent")
         grid.pack(fill="x", padx=20, pady=10)
-        ctk.CTkLabel(grid, text="Helius API Key", font=font(13), text_color=TEXT).grid(row=0, column=0, sticky="w", pady=6)
-        self.helius_var = ctk.StringVar(value=getattr(app.config, "helius_api_key", "") or "")
-        ctk.CTkEntry(grid, textvariable=self.helius_var, width=420, show="*").grid(row=0, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Helius Keys（一行一把，可选增强）", font=font(13), text_color=TEXT).grid(row=0, column=0, sticky="nw", pady=6)
+        self.helius_box = ctk.CTkTextbox(grid, width=420, height=70, font=font(13))
+        self.helius_box.grid(row=0, column=1, sticky="w", padx=8)
+        existing_helius = list(getattr(app.config, "helius_api_keys", None) or [])
+        if not existing_helius and getattr(app.config, "helius_api_key", ""):
+            existing_helius = [app.config.helius_api_key]
+        if existing_helius:
+            self.helius_box.insert("1.0", "\n".join(existing_helius))
         ctk.CTkLabel(grid, text="Helius 月度 Credit 预算（本地估算）", font=font(13), text_color=TEXT).grid(row=1, column=0, sticky="w", pady=6)
         self.helius_budget_var = ctk.StringVar(value=str(int(getattr(app.config, "helius_monthly_credit_budget", 1_000_000) or 1_000_000)))
         ctk.CTkEntry(grid, textvariable=self.helius_budget_var, width=160).grid(row=1, column=1, sticky="w", padx=8)
@@ -101,9 +108,9 @@ class SettingsPage(ctk.CTkFrame):
         self.mode_var = ctk.StringVar(value=getattr(app.config, "verification_mode", "BALANCED") or "BALANCED")
         ctk.CTkComboBox(grid, variable=self.mode_var, values=["FAST", "BALANCED", "STRICT"], width=160).grid(row=5, column=1, sticky="w", padx=8)
         ctk.CTkLabel(grid, text="启用 Moralis（主索引）", font=font(13), text_color=TEXT).grid(row=6, column=0, sticky="w", pady=6)
-        self.enable_moralis_var = ctk.BooleanVar(value=bool(getattr(app.config, "enable_moralis", True)))
-        ctk.CTkCheckBox(grid, text="有 Key 时作为钱包 Swap 主索引", variable=self.enable_moralis_var).grid(row=6, column=1, sticky="w", padx=8)
-        ctk.CTkLabel(grid, text="Moralis Keys（一行一把，可增删）", font=font(13), text_color=TEXT).grid(row=7, column=0, sticky="nw", pady=6)
+        self.enable_moralis_var = ctk.BooleanVar(value=bool(getattr(app.config, "enable_moralis", False)))
+        ctk.CTkCheckBox(grid, text="仅在有付费 Moralis Key 时勾选", variable=self.enable_moralis_var).grid(row=6, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Moralis Keys（可选，一行一把）", font=font(13), text_color=TEXT).grid(row=7, column=0, sticky="nw", pady=6)
         self.moralis_box = ctk.CTkTextbox(grid, width=420, height=70, font=font(13))
         self.moralis_box.grid(row=7, column=1, sticky="w", padx=8)
         existing_moralis = list(getattr(app.config, "moralis_api_keys", None) or [])
@@ -114,7 +121,7 @@ class SettingsPage(ctk.CTkFrame):
         src_btns = ctk.CTkFrame(sources, fg_color="transparent")
         src_btns.pack(fill="x", padx=20, pady=(0, 16))
         ctk.CTkButton(src_btns, text="测试数据源", width=120, command=self.test_sources).pack(side="left")
-        self.source_status = ctk.CTkLabel(src_btns, text="Moralis 主索引 · Solana RPC 兜底 · DEX 无需 Key · Helius 可选", font=font(12), text_color=MUTED)
+        self.source_status = ctk.CTkLabel(src_btns, text="Solana RPC 主路径 · Helius 可选增强 · DEX 无需 Key · Moralis 可选", font=font(12), text_color=MUTED)
         self.source_status.pack(side="left", padx=10)
 
     def _util_label(self, value: float) -> str:
@@ -132,8 +139,8 @@ class SettingsPage(ctk.CTkFrame):
             return 0.80
         return 0.75
 
-    def _moralis_keys(self) -> list[str]:
-        text = self.moralis_box.get("1.0", "end")
+    def _parse_key_box(self, box) -> list[str]:
+        text = box.get("1.0", "end")
         keys = []
         for line in text.replace(",", "\n").splitlines():
             item = line.strip()
@@ -141,14 +148,14 @@ class SettingsPage(ctk.CTkFrame):
                 keys.append(item)
         return keys
 
+    def _helius_keys(self) -> list[str]:
+        return self._parse_key_box(self.helius_box)
+
+    def _moralis_keys(self) -> list[str]:
+        return self._parse_key_box(self.moralis_box)
+
     def _keys(self) -> list[str]:
-        text = self.keys_box.get("1.0", "end")
-        keys = []
-        for line in text.replace(",", "\n").splitlines():
-            item = line.strip()
-            if item and item not in keys:
-                keys.append(item)
-        return keys
+        return self._parse_key_box(self.keys_box)
 
     def _key_status_text(self) -> str:
         lines = [
@@ -169,6 +176,18 @@ class SettingsPage(ctk.CTkFrame):
         self.cap_var.set(cap)
 
     def save(self) -> None:
+        from app.config import _rehome_helius_keys
+
+        moralis_keys, helius_keys = _rehome_helius_keys(self._moralis_keys(), self._helius_keys())
+        if moralis_keys != self._moralis_keys() or helius_keys != self._helius_keys():
+            self.moralis_box.delete("1.0", "end")
+            if moralis_keys:
+                self.moralis_box.insert("1.0", "\n".join(moralis_keys))
+            self.helius_box.delete("1.0", "end")
+            if helius_keys:
+                self.helius_box.insert("1.0", "\n".join(helius_keys))
+            if not moralis_keys:
+                self.enable_moralis_var.set(False)
         keys = self._keys()
         save_api_settings(
             keys[0] if keys else "",
@@ -182,8 +201,9 @@ class SettingsPage(ctk.CTkFrame):
             extra={
                 "MORALIS_API_KEY": self._moralis_keys()[0] if self._moralis_keys() else "",
                 "MORALIS_API_KEYS": ",".join(self._moralis_keys()),
-                "ENABLE_MORALIS": "true" if self.enable_moralis_var.get() else "false",
-                "HELIUS_API_KEY": self.helius_var.get().strip(),
+                "ENABLE_MORALIS": "true" if (self.enable_moralis_var.get() and self._moralis_keys()) else "false",
+                "HELIUS_API_KEY": self._helius_keys()[0] if self._helius_keys() else "",
+                "HELIUS_API_KEYS": ",".join(self._helius_keys()),
                 "HELIUS_TARGET_RPS": self.helius_rps_var.get().strip() or "8",
                 "HELIUS_MONTHLY_CREDIT_BUDGET": self.helius_budget_var.get().strip() or "1000000",
                 "SOLANA_RPC_URL": self.rpc_var.get().strip() or "https://api.mainnet-beta.solana.com",
@@ -287,6 +307,7 @@ class SettingsPage(ctk.CTkFrame):
 
                 h = HeliusProvider(
                     self.app.config.helius_api_key,
+                    api_keys=list(getattr(self.app.config, "helius_api_keys", None) or []),
                     target_rps=float(getattr(self.app.config, "helius_target_rps", 8) or 8),
                     monthly_budget=int(getattr(self.app.config, "helius_monthly_credit_budget", 1_000_000) or 1_000_000),
                 )

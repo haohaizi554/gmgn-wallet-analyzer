@@ -14,4 +14,7 @@ class StatCard(ctk.CTkFrame):
         self.value_label.pack(fill="x", padx=12, pady=(4, 12))
 
     def set_value(self, value: str) -> None:
-        self.value_label.configure(text=value or "—")
+        text = value or "—"
+        if self.value_label.cget("text") == text:
+            return
+        self.value_label.configure(text=text)

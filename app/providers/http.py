@@ -22,12 +22,16 @@ PLAN_UNAVAILABLE = "PLAN_UNAVAILABLE"
 PERMISSION_DENIED = "PERMISSION_DENIED"
 
 
-def _session() -> requests.Session:
+def build_http_session(pool_size: int = 24) -> requests.Session:
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
+    adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size, max_retries=0)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
+
+def _session() -> requests.Session:
+    return build_http_session()
 
 
 def _sleep(owner: DataProvider, seconds: float) -> None:
@@ -94,7 +98,6 @@ class HttpProviderMixin:
             except requests.RequestException as exc:
                 owner.metrics.errors += 1
                 owner.metrics.network_error += 1
-                owner.circuit.record_failure(None)
                 last_error = ProviderError(
                     f"{owner.name} 网络错误: {exc}",
                     provider=owner.name,
@@ -114,6 +117,7 @@ class HttpProviderMixin:
                     logger.info("%s retry=%.2fs", owner.name, delay)
                     _sleep(owner, delay)
                     continue
+                owner.circuit.record_failure(None)
                 logger.warning("%s failed after %s attempts", owner.name, attempt)
                 raise last_error from exc
             elapsed = time.perf_counter() - started
@@ -153,7 +157,6 @@ class HttpProviderMixin:
                 )
             if status in policy.retry_statuses or status >= 500:
                 owner.metrics.count_5xx += 1
-                owner.circuit.record_failure(status)
                 last_error = ProviderError(
                     f"{owner.name} HTTP {status}",
                     provider=owner.name,
@@ -166,6 +169,7 @@ class HttpProviderMixin:
                     logger.info("%s HTTP %s attempt=%s retry=%.2fs", owner.name, status, attempt, delay)
                     _sleep(owner, delay)
                     continue
+                owner.circuit.record_failure(status)
                 logger.warning("%s failed after %s attempts", owner.name, attempt)
                 raise last_error
             if status >= 400:
@@ -176,7 +180,7 @@ class HttpProviderMixin:
             if attempt > 1:
                 logger.info("provider=%s recovered attempt=%s status=%s latency=%.2fs", owner.name, attempt, status, elapsed)
             else:
-                logger.info("provider=%s method=%s status=%s latency=%.2fs", owner.name, method, status, elapsed)
+                logger.debug("provider=%s method=%s status=%s latency=%.2fs", owner.name, method, status, elapsed)
             return body
         if last_error:
             raise last_error

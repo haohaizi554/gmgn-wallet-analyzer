@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
 
 from app.domain.enums import HeliusCapStatus, ProviderCapability, ProviderHealth
@@ -34,16 +35,19 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
         rest_rps: float = 1.6,
         monthly_budget: int = 1_000_000,
         credits: HeliusCreditTracker | None = None,
+        api_keys: list[str] | None = None,
     ) -> None:
         super().__init__()
-        self.api_key = (api_key or "").strip()
+        keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
+        primary = (api_key or "").strip()
+        if primary and primary not in keys:
+            keys.insert(0, primary)
+        self.api_keys = keys
+        self._key_index = 0
+        self.api_key = self.api_keys[0] if self.api_keys else ""
         self.rest_base = "https://api.helius.xyz"
-        if rpc_url:
-            self.rpc_url = rpc_url.rstrip("/")
-        elif self.api_key:
-            self.rpc_url = f"{OFFICIAL_RPC}/?api-key={self.api_key}"
-        else:
-            self.rpc_url = ""
+        self._rpc_override = (rpc_url or "").strip().rstrip("/")
+        self._sync_rpc_url()
         self._shared_session = session
         self.cache = cache
         self.rpc_limiter = IndependentRateLimiter(rate=max(0.5, float(target_rps)), capacity=max(1.0, float(target_rps)), min_spacing=0.05)
@@ -53,6 +57,7 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
         self.cap_flags = {k: False for k in PROBE_CAPS}
         self.cap_status: dict[str, str] = {k: HeliusCapStatus.NOT_CONFIGURED.value for k in PROBE_CAPS}
         self.probed = False
+        self._probe_lock = threading.Lock()
         self.history_pages = 0
         if not self.api_key:
             self.health = ProviderHealth.NOT_CONFIGURED
@@ -65,6 +70,22 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
             self.enabled = True
             self.capabilities = {ProviderCapability.TRANSACTION_DETAIL}
 
+    def _sync_rpc_url(self) -> None:
+        if self._rpc_override:
+            self.rpc_url = self._rpc_override
+        elif self.api_key:
+            self.rpc_url = f"{OFFICIAL_RPC}/?api-key={self.api_key}"
+        else:
+            self.rpc_url = ""
+
+    def _rotate_key(self) -> None:
+        if len(self.api_keys) <= 1:
+            return
+        self._key_index = (self._key_index + 1) % len(self.api_keys)
+        self.api_key = self.api_keys[self._key_index]
+        self._sync_rpc_url()
+        logger.info("Helius 轮换 Key -> ****%s", self.api_key[-4:] if len(self.api_key) >= 4 else "")
+
     def _use_rpc(self) -> None:
         self.limiter = self.rpc_limiter
 
@@ -74,19 +95,20 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
     def ensure_probed(self, repos=None, force: bool = False) -> dict[str, str]:
         if not self.api_key:
             return dict(self.cap_status)
-        if not force and self.probed:
-            return dict(self.cap_status)
-        if repos and not force:
-            cached = repos.get_helius_capabilities() if hasattr(repos, "get_helius_capabilities") else None
-            if cached:
-                self.cap_status = cached
-                apply_probe_result(self, cached)
-                self.probed = True
+        with self._probe_lock:
+            if not force and self.probed:
                 return dict(self.cap_status)
-        result = self.probe_capabilities()
-        if repos and hasattr(repos, "save_helius_capabilities"):
-            repos.save_helius_capabilities(result)
-        return result
+            if repos and not force:
+                cached = repos.get_helius_capabilities() if hasattr(repos, "get_helius_capabilities") else None
+                if cached:
+                    self.cap_status = cached
+                    apply_probe_result(self, cached)
+                    self.probed = True
+                    return dict(self.cap_status)
+            result = self.probe_capabilities()
+            if repos and hasattr(repos, "save_helius_capabilities"):
+                repos.save_helius_capabilities(result)
+            return result
 
     def probe_capabilities(self) -> dict[str, str]:
         result = {k: HeliusCapStatus.NOT_CONFIGURED.value for k in PROBE_CAPS}
@@ -253,9 +275,11 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
             if hit is not None:
                 self.metrics.cache_hit += 1
                 return hit
+        from app.providers.solana.rpc_client import TX_READ_OPTIONS
+
         result = self.rpc_call(
             "getTransaction",
-            [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}],
+            [signature, dict(TX_READ_OPTIONS)],
         )
         if result and self.cache:
             self.cache.set(self.name, "TRANSACTION_DETAIL", signature, result, 10 * 365 * 24 * 3600)
@@ -301,6 +325,7 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
             symbol=str(meta.get("symbol") or token_info.get("symbol") or "").strip(),
             decimals=int(token_info["decimals"]) if token_info.get("decimals") not in (None, "") else None,
             total_supply=to_decimal(token_info.get("supply")),
+            total_supply_formatted=_formatted_supply(token_info),
             raw=asset,
         )
 
@@ -308,3 +333,21 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
         if not self.api_key:
             return {"ok": False, "detail": "未配置"}
         return self.probe_capabilities()
+
+
+def _formatted_supply(token_info: dict[str, Any]):
+    from decimal import Decimal
+
+    from app.utils.money import to_decimal
+
+    raw = to_decimal(token_info.get("supply"))
+    if raw is None:
+        return None
+    decimals = token_info.get("decimals")
+    try:
+        dec_i = int(decimals) if decimals not in (None, "") else None
+    except (TypeError, ValueError):
+        dec_i = None
+    if dec_i is None or dec_i < 0:
+        return raw
+    return raw / (Decimal(10) ** dec_i)

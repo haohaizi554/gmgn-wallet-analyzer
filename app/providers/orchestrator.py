@@ -64,6 +64,8 @@ class DataOrchestrator:
         self.history_call_count = 0
         self.last_coverage: HistoryCoverage | None = None
         self.last_swap_index: WalletSwapIndex | None = None
+        self._sol_usd = None
+        self._sol_usd_loaded = False
 
     @classmethod
     def from_config(cls, config, gmgn_client: GMGNClient | None, db: Database | None, cancel_event=None, on_health=None) -> "DataOrchestrator":
@@ -86,7 +88,10 @@ class DataOrchestrator:
             )
         )
         rpc_url = resolve_solana_rpc_url(config)
-        helius_key = getattr(config, "helius_api_key", "") or ""
+        helius_keys = list(getattr(config, "helius_api_keys", None) or [])
+        helius_key = (getattr(config, "helius_api_key", "") or "").strip()
+        if helius_key and helius_key not in helius_keys:
+            helius_keys.insert(0, helius_key)
         using_helius_rpc = "helius-rpc.com" in rpc_url
         providers.append(
             SolanaRpcProvider(
@@ -97,7 +102,8 @@ class DataOrchestrator:
         )
         providers.append(
             HeliusProvider(
-                api_key=helius_key,
+                api_key=helius_keys[0] if helius_keys else "",
+                api_keys=helius_keys,
                 rpc_url=getattr(config, "helius_rpc_url", "") or "",
                 cache=cache,
                 target_rps=float(getattr(config, "helius_target_rps", 8.0) or 8.0),
@@ -119,7 +125,15 @@ class DataOrchestrator:
         except KeyError:
             mode = VerificationMode.BALANCED
         orch = cls(providers, db=db, verification_mode=mode, cancel_event=cancel_event, on_health=on_health)
+        from app.providers.http import build_http_session
+
+        shared = build_http_session()
+        for item in orch.providers.values():
+            item._shared_session = shared
         helius = orch.providers.get("helius")
+        rpc = orch.providers.get("solana_rpc")
+        if using_helius_rpc and isinstance(helius, HeliusProvider) and helius.enabled and isinstance(rpc, SolanaRpcProvider):
+            rpc.limiter = helius.rpc_limiter
         if isinstance(helius, HeliusProvider) and helius.enabled and orch.repos:
             helius.credits.load_month(orch.repos.get_helius_credit_usage())
         return orch
@@ -186,10 +200,12 @@ class DataOrchestrator:
         moralis_on = isinstance(moralis, MoralisProvider) and moralis.enabled and moralis.has_capability(ProviderCapability.WALLET_SWAPS)
         helius_on = isinstance(helius, HeliusProvider) and helius.enabled
         gmgn_deep = bool(gmgn and gmgn.enabled and getattr(gmgn, "deep_history", False))
+        primary = "MORALIS" if moralis_on else ("HELIUS" if helius_on else "SOLANA_RPC")
         logger.info(
-            "history.primary=MORALIS history.fallback=SOLANA_RPC moralis.enabled=%s helius.optional=%s gmgn.deep_history=%s",
+            "history.primary=%s history.fallback=SOLANA_RPC moralis.enabled=%s helius.optional=%s gmgn.deep_history=%s",
+            primary,
             str(moralis_on).lower(),
-            str(True).lower(),
+            str(helius_on).lower(),
             str(gmgn_deep).lower(),
         )
         errors: list[str] = []
@@ -225,91 +241,50 @@ class DataOrchestrator:
                     moralis.metrics.fallback_count += 1
                     logger.warning("moralis wallet swaps failed fallback=SOLANA_RPC: %s", exc)
 
+        helius_index = self._try_helius_wallet_history(
+            wallet,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            max_transactions=max_transactions,
+            as_fallback=bool(moralis_on or fallback_used),
+        )
+        if helius_index is not None:
+            return self._finish_index(helius_index, fallback_used=helius_index.fallback_used)
+
         if isinstance(rpc, SolanaRpcProvider):
             try:
                 self.history_call_count += 1
                 hist = collect_rpc_fallback(rpc, wallet, start_ts=start_ts, end_ts=end_ts)
                 if hist.transactions:
-                    index = _index_from_history(wallet, hist, provider="solana_rpc", source=DataSource.SOLANA_RPC)
+                    index = _index_from_history(
+                        wallet,
+                        hist,
+                        provider="solana_rpc",
+                        source=DataSource.SOLANA_RPC,
+                        sol_usd=self.sol_usd_price(),
+                    )
                     cov = coverage_from_swaps(
                         provider=DataSource.SOLANA_RPC,
                         start_ts=start_ts,
                         end_ts=end_ts,
                         timestamps=[s.block_timestamp for s in index.swaps],
                         pages=hist.pages,
-                        complete=True,
-                        success=True,
-                    )
-                    cov.fallback_used = fallback_used
-                    cov.fallback_provider = fallback_name or "SOLANA_RPC"
-                    index.coverage = cov
-                    index.success = True
-                    index.complete = True
-                    index.fallback_used = fallback_used
-                    index.provider = "solana_rpc"
-                    logger.info("RPC wallet history fallback wallet=%s tokens=%s", wallet[:8], len(index.by_token))
-                    return self._finish_index(index, fallback_used=fallback_used)
-                errors.append("rpc_empty")
-            except ProviderError as exc:
-                errors.append(str(exc))
-                logger.warning("RPC wallet history fallback 失败: %s", exc)
-
-        if helius_on:
-            try:
-                helius.ensure_probed(self.repos)
-            except Exception as exc:
-                logger.warning("Helius capability probe 失败，跳过 optional enhance: %s", exc)
-            if helius.cap_flags.get("WALLET_HISTORY"):
-                try:
-                    until = None
-                    prev = self.repos.get_wallet_history_state(wallet, "helius") if self.repos else None
-                    if prev and prev.get("bottom_complete") and prev.get("newest_signature"):
-                        until = prev.get("newest_signature")
-                    self.history_call_count += 1
-                    hist = helius.collect_history(
-                        wallet,
-                        start_ts=start_ts,
-                        end_ts=end_ts,
-                        max_transactions=max_transactions,
-                        until_signature=until,
-                    )
-                    index = _index_from_history(wallet, hist, provider="helius", source=DataSource.HELIUS)
-                    cached = self._load_cached_swaps(wallet, "helius")
-                    if cached:
-                        index.swaps = merge_swaps(index.swaps, cached)
-                        index.by_token = _index_swaps(wallet, index.swaps)
-                        index.from_cache = True
-                    self._persist_swaps(wallet, "helius", index.swaps)
-                    self._persist_history_state(wallet, "helius", index.swaps, bottom_complete=bool(hist.bottom_complete))
-                    cov = coverage_from_swaps(
-                        provider=DataSource.HELIUS,
-                        start_ts=start_ts,
-                        end_ts=end_ts,
-                        timestamps=[s.block_timestamp for s in index.swaps],
-                        pages=hist.pages,
-                        complete=bool(hist.bottom_complete or cached),
+                        complete=bool(hist.bottom_complete),
                         success=True,
                     )
                     cov.fallback_used = True
-                    cov.fallback_provider = "HELIUS_OPTIONAL_HISTORY"
+                    cov.fallback_provider = fallback_name or "SOLANA_RPC"
                     index.coverage = cov
                     index.success = True
                     index.complete = cov.complete
                     index.fallback_used = True
-                    index.provider = "helius"
-                    self.last_history = hist
-                    logger.info("Helius optional history wallet=%s tokens=%s pages=%s", wallet[:8], len(index.by_token), hist.pages)
+                    index.provider = "solana_rpc"
+                    logger.info("RPC wallet history fallback wallet=%s tokens=%s", wallet[:8], len(index.by_token))
                     return self._finish_index(index, fallback_used=True)
-                except ProviderPlanError as exc:
-                    logger.warning("Helius Wallet History PLAN_UNAVAILABLE, skip: %s", exc)
-                    helius.cap_flags["WALLET_HISTORY"] = False
-                    helius.cap_status["WALLET_HISTORY"] = HeliusCapStatus.PLAN_UNAVAILABLE.value
-                    helius.metrics.fallback_count += 1
-                    errors.append("helius_plan_unavailable")
-                except ProviderError as exc:
-                    logger.warning("Helius optional history 失败: %s", exc)
-                    helius.metrics.fallback_count += 1
-                    errors.append(str(exc))
+                errors.append("rpc_empty")
+            except ProviderError as exc:
+                errors.append(str(exc))
+                logger.warning("RPC wallet history fallback 失败: %s", exc)
 
         if gmgn_deep:
             logger.info("GMGN deep history fallback enabled, still not treating empty as verified")
@@ -336,6 +311,97 @@ class DataOrchestrator:
         )
         logger.warning("history unknown_empty wallet=%s errors=%s", wallet[:8], errors)
         return self._finish_index(empty, fallback_used=fallback_used)
+
+    def sol_usd_price(self):
+        if self._sol_usd_loaded:
+            return self._sol_usd
+        self._sol_usd_loaded = True
+        dex = self.providers.get("dexscreener")
+        if isinstance(dex, DexScreenerProvider) and dex.enabled:
+            try:
+                self._sol_usd = dex.get_sol_usd()
+            except Exception as exc:
+                logger.warning("DEX SOL/USD 获取失败: %s", exc)
+                self._sol_usd = None
+        return self._sol_usd
+
+    def _try_helius_wallet_history(
+        self,
+        wallet: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        max_transactions: int,
+        as_fallback: bool,
+    ) -> WalletSwapIndex | None:
+        helius = self.providers.get("helius")
+        if not isinstance(helius, HeliusProvider) or not helius.enabled:
+            return None
+        try:
+            helius.ensure_probed(self.repos)
+        except Exception as exc:
+            logger.warning("Helius capability probe 失败，跳过 wallet history: %s", exc)
+            return None
+        if not helius.cap_flags.get("WALLET_HISTORY"):
+            return None
+        try:
+            until = None
+            prev = self.repos.get_wallet_history_state(wallet, "helius") if self.repos else None
+            if prev and prev.get("bottom_complete") and prev.get("newest_signature"):
+                until = prev.get("newest_signature")
+            self.history_call_count += 1
+            hist = helius.collect_history(
+                wallet,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                max_transactions=max_transactions,
+                until_signature=until,
+            )
+            if not hist.transactions and not hist.bottom_complete:
+                return None
+            index = _index_from_history(
+                wallet,
+                hist,
+                provider="helius",
+                source=DataSource.HELIUS,
+                sol_usd=self.sol_usd_price(),
+            )
+            cached = self._load_cached_swaps(wallet, "helius")
+            if cached:
+                index.swaps = merge_swaps(index.swaps, cached)
+                index.by_token = _index_swaps(wallet, index.swaps)
+                index.from_cache = True
+            self._persist_swaps(wallet, "helius", index.swaps)
+            self._persist_history_state(wallet, "helius", index.swaps, bottom_complete=bool(hist.bottom_complete))
+            cov = coverage_from_swaps(
+                provider=DataSource.HELIUS,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                timestamps=[s.block_timestamp for s in index.swaps],
+                pages=hist.pages,
+                complete=bool(hist.bottom_complete or cached),
+                success=True,
+            )
+            cov.fallback_used = as_fallback
+            cov.fallback_provider = "HELIUS" if as_fallback else ""
+            index.coverage = cov
+            index.success = True
+            index.complete = cov.complete
+            index.fallback_used = as_fallback
+            index.provider = "helius"
+            self.last_history = hist
+            logger.info("Helius wallet history wallet=%s tokens=%s pages=%s", wallet[:8], len(index.by_token), hist.pages)
+            return index
+        except ProviderPlanError as exc:
+            logger.warning("Helius Wallet History PLAN_UNAVAILABLE, skip: %s", exc)
+            helius.cap_flags["WALLET_HISTORY"] = False
+            helius.cap_status["WALLET_HISTORY"] = HeliusCapStatus.PLAN_UNAVAILABLE.value
+            helius.metrics.fallback_count += 1
+            return None
+        except ProviderError as exc:
+            logger.warning("Helius wallet history 失败: %s", exc)
+            helius.metrics.fallback_count += 1
+            return None
 
     def _collect_moralis_swaps(self, wallet: str, start_ts: int, end_ts: int, max_transactions: int) -> WalletSwapIndex:
         moralis: MoralisProvider = self.providers["moralis"]  # type: ignore[assignment]
@@ -406,6 +472,13 @@ class DataOrchestrator:
 
     def _finish_index(self, index: WalletSwapIndex, fallback_used: bool) -> WalletSwapIndex:
         index.fallback_used = index.fallback_used or fallback_used
+        sol_usd = self.sol_usd_price()
+        if sol_usd is not None and index.swaps:
+            from app.resolvers.historical_price import enrich_swap_usd
+
+            for item in index.swaps:
+                enrich_swap_usd(item, sol_usd)
+            index.by_token = _index_swaps(index.wallet, index.swaps)
         self.last_swap_index = index
         self.last_coverage = index.coverage
         return index
@@ -416,7 +489,7 @@ class DataOrchestrator:
         if self.last_history and getattr(self.last_history, "token_events", None):
             bucket = self.last_history.token_events.get(token)
             if bucket and bucket.earliest_buy:
-                swaps = history_to_swaps(wallet, [bucket.earliest_buy])
+                swaps = history_to_swaps(wallet, [bucket.earliest_buy], sol_usd=self.sol_usd_price())
                 return swaps[0] if swaps else None
         return None
 
@@ -575,8 +648,8 @@ class DataOrchestrator:
         )
 
 
-def _index_from_history(wallet: str, hist, provider: str = "helius", source: DataSource | None = None) -> WalletSwapIndex:
-    swaps = history_to_swaps(wallet, hist.transactions)
+def _index_from_history(wallet: str, hist, provider: str = "helius", source: DataSource | None = None, sol_usd=None) -> WalletSwapIndex:
+    swaps = history_to_swaps(wallet, hist.transactions, sol_usd=sol_usd)
     if source is not None:
         for item in swaps:
             item.source = source

@@ -196,6 +196,7 @@ class WalletAnalysisService:
                 pool_map = self.orchestrator.batch_pools(token_ids)
             except Exception as exc:
                 logger.warning("DEX batch 失败: %s", exc)
+        self._stamp_trade_symbols(report_trades, metadata_map, pool_map)
         try:
             stats = gmgn_future_stats.result() if gmgn_future_stats else self._load_stats(request)
             profit = gmgn_future_profit.result() if gmgn_future_profit else self._load_profit(request)
@@ -252,7 +253,10 @@ class WalletAnalysisService:
                 for fut in finished:
                     token_address = fut_token.pop(fut, "")
                     done += 1
-                    symbol_hint = next((t.token_symbol for t in report_trades if t.token_address == token_address), token_address[:6])
+                    symbol_hint = next((t.token_symbol for t in report_trades if t.token_address == token_address and t.token_symbol and t.token_symbol != "未知"), "")
+                    if not symbol_hint:
+                        meta = (metadata_map or {}).get(token_address)
+                        symbol_hint = (getattr(meta, "symbol", "") if meta else "") or token_address[:6]
                     self._progress("token", f"Token {done}/{len(token_ids)} {symbol_hint}", done, len(token_ids), request.wallet_address, token_address)
                     self.repos.upsert_task(
                         task_id,
@@ -453,7 +457,10 @@ class WalletAnalysisService:
         metadata_map: dict | None = None,
         pool_map: dict | None = None,
     ) -> tuple[TokenAnalysisResult, list[TradeRecord]]:
-        symbol = next((t.token_symbol for t in report_trades if t.token_address == token_address), token_address[:6])
+        symbol = next((t.token_symbol for t in report_trades if t.token_address == token_address and t.token_symbol and t.token_symbol != "未知"), "")
+        if not symbol:
+            meta_early = (metadata_map or {}).get(token_address)
+            symbol = (getattr(meta_early, "symbol", "") if meta_early else "") or token_address[:6]
         self._progress("first_buy", f"正在追溯 {symbol} 首次买入", 0, 0, request.wallet_address, token_address)
         use_index = bool(swap_index and swap_index.by_token.get(token_address) and not self.deep_gmgn_history)
         history: list[TradeRecord]
@@ -495,6 +502,7 @@ class WalletAnalysisService:
                 merged.add(trade.activity_fingerprint)
         if not history:
             history = [t for t in report_trades if t.token_address == token_address]
+        self._stamp_trade_symbols(history, metadata_map, pool_map)
 
         token_info = None
         pool_info = None
@@ -572,6 +580,9 @@ class WalletAnalysisService:
         sells = [t for t in report_token_trades if t.event_type == EventType.SELL]
         buy_total = _sum_optional([t.cost_usd for t in buys])
         sell_total = _sum_optional([t.cost_usd for t in sells])
+        buy_total_estimated = bool(buys) and any(getattr(t, "cost_usd_estimated", False) for t in buys)
+        sell_total_estimated = bool(sells) and any(getattr(t, "cost_usd_estimated", False) for t in sells)
+        cost_est_any = any(getattr(t, "cost_usd_estimated", False) for t in history if t.cost_usd is not None)
 
         created = (
             known(token_info.creation_timestamp, "token_info.creation_timestamp")
@@ -612,15 +623,33 @@ class WalletAnalysisService:
                         )
             except Exception as exc:
                 logger.warning("Mint creation 查找失败: %s", exc)
+        if created.value is None and pool_info and pool_info.creation_timestamp:
+            created = known(int(pool_info.creation_timestamp), "dexscreener.pairCreatedAt", estimated=True, reason="用池创建时间近似代币创建时间")
 
         if acq.acquisition_type == AcquisitionType.BUY:
-            first_buy_display = known(acq.cost_usd, "wallet_activity.first_buy.cost_usd") if acq.cost_usd is not None else missing("wallet_activity", "无法验证历史美元成本")
+            first_buy_trade = min(
+                (t for t in history if t.event_type == EventType.BUY and t.timestamp > 0),
+                key=lambda t: (t.timestamp, t.tx_hash),
+                default=None,
+            )
+            cost_est = bool(first_buy_trade and getattr(first_buy_trade, "cost_usd_estimated", False))
+            first_buy_display = (
+                known(
+                    acq.cost_usd,
+                    "wallet_activity.first_buy.cost_usd",
+                    estimated=cost_est,
+                    reason="SOL × 当前 SOL/USD 估算" if cost_est else "",
+                )
+                if acq.cost_usd is not None
+                else missing("wallet_activity", "无法验证历史美元成本")
+            )
             first_amount = known(acq.amount, "wallet_activity.first_buy.token_amount") if acq.amount is not None else missing("wallet_activity", "无法验证")
             first_time = known(acq.timestamp, "wallet_activity.first_buy.timestamp") if acq.timestamp else missing("wallet_activity", "无法验证")
             if moralis_buy and self.orchestrator is not None and self.orchestrator.should_verify("first_buy"):
                 try:
                     verified = self.orchestrator.verify_tx(request.wallet_address, token_address, moralis_buy.transaction_hash)
-                    fields = resolve_first_buy(moralis_buy, verified)
+                    sol_usd = self.orchestrator.sol_usd_price() if self.orchestrator is not None else None
+                    fields = resolve_first_buy(moralis_buy, verified, sol_usd=sol_usd)
                     if "first_buy_time" in fields and fields["first_buy_time"].value:
                         first_time = fields["first_buy_time"].to_audited()
                         acq.timestamp = int(fields["first_buy_time"].value)
@@ -653,6 +682,8 @@ class WalletAnalysisService:
                     if usd is not None and moralis_buy.bought.amount:
                         price = abs(usd) / abs(moralis_buy.bought.amount)
             supply_now = token_info.total_supply if token_info else None
+            if supply_now is None and token_info and getattr(token_info, "circulating_supply", None):
+                supply_now = token_info.circulating_supply
             if self.orchestrator is not None:
                 try:
                     rpc_supply = self.orchestrator.token_supply(token_address)
@@ -660,15 +691,43 @@ class WalletAnalysisService:
                         supply_now = rpc_supply
                 except Exception:
                     pass
+            if (supply_now is None or supply_now <= 0) and pool_info and pool_info.price not in (None, 0):
+                primary_for_supply = select_primary_pool(pairs, token_address) if pairs else None
+                mcap_now = getattr(primary_for_supply, "market_cap", None) if primary_for_supply else None
+                if mcap_now not in (None, 0):
+                    supply_now = mcap_now / pool_info.price
             entry = resolve_entry_market_cap(price, None, supply_now)
             market_cap = entry.to_audited()
 
         fifo_profit = (
-            known(fifo.realized_profit, "local_fifo")
+            known(fifo.realized_profit, "local_fifo", estimated=cost_est_any)
             if fifo.realized_profit is not None
             else not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "无已实现卖出")
         )
-        gmgn_realized = missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
+        realized_profit = fifo_profit if fifo.realized_profit is not None else missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
+        current_price = None
+        if pool_info and pool_info.price is not None:
+            current_price = pool_info.price
+        elif acq.price_usd is not None:
+            current_price = acq.price_usd
+        if position_is_closed := (fifo.current_balance <= 0):
+            unrealized_profit = known(Decimal("0"), "local_fifo", reason="已清仓")
+        elif current_price is not None and fifo.remaining_cost_usd is not None:
+            unrl = current_price * fifo.current_balance - fifo.remaining_cost_usd
+            unrealized_profit = known(unrl, "local_fifo", estimated=True, reason="当前价 × 余额 − 剩余成本")
+        else:
+            unrealized_profit = missing("wallet_holdings", "未使用 holdings 接口，单 Token 未实现盈亏见 FIFO 余额")
+        total_value = None
+        if fifo.realized_profit is not None and unrealized_profit.value is not None:
+            total_value = fifo.realized_profit + Decimal(str(unrealized_profit.value))
+            total_profit = known(total_value, "local_fifo", estimated=unrealized_profit.estimated or cost_est_any)
+            if buy_total not in (None, 0):
+                total_profit_pnl = known(total_value / buy_total, "local_fifo", estimated=True)
+            else:
+                total_profit_pnl = missing("wallet_profits", "无买入总额，无法计算收益率")
+        else:
+            total_profit = missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
+            total_profit_pnl = missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
         position = TokenPositionStatus.OPEN if fifo.current_balance > 0 else TokenPositionStatus.CLOSED
         status = TaskStatus.SUCCESS
         notes = []
@@ -704,10 +763,12 @@ class WalletAnalysisService:
             buy_total_usd=buy_total,
             sell_count=len(sells),
             sell_total_usd=sell_total,
-            realized_profit=gmgn_realized,
-            unrealized_profit=missing("wallet_holdings", "未使用 holdings 接口，单 Token 未实现盈亏见 FIFO 余额"),
-            total_profit=missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总"),
-            total_profit_pnl=missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总"),
+            buy_total_estimated=buy_total_estimated,
+            sell_total_estimated=sell_total_estimated,
+            realized_profit=realized_profit,
+            unrealized_profit=unrealized_profit,
+            total_profit=total_profit,
+            total_profit_pnl=total_profit_pnl,
             fifo_realized_profit=fifo_profit,
             current_balance=fifo.current_balance,
             calculated_balance=fifo.current_balance,
@@ -888,6 +949,12 @@ class WalletAnalysisService:
         total = known(profit.total_profit, "wallet_profits.total_profit") if profit.status == FieldStatus.KNOWN and profit.total_profit is not None else (
             missing("wallet_profits", profit.reason or "GMGN 未提供") if profit.status != FieldStatus.ERROR else error_value("wallet_profits", profit.reason)
         )
+        fifo_realized = [t.fifo_realized_profit.value for t in tokens if t.fifo_realized_profit.value is not None]
+        fifo_total = [t.total_profit.value for t in tokens if t.total_profit.value is not None]
+        if realized.value is None and fifo_realized:
+            realized = known(sum((Decimal(str(v)) for v in fifo_realized), Decimal("0")), "local_fifo", estimated=True, reason="各 Token FIFO 合计")
+        if total.value is None and fifo_total:
+            total = known(sum((Decimal(str(v)) for v in fifo_total), Decimal("0")), "local_fifo", estimated=True, reason="各 Token FIFO 合计")
         return AnalysisSummary(
             token_count=len(tokens),
             buy_count=buy_count,
@@ -900,8 +967,24 @@ class WalletAnalysisService:
             missing_cost_count=missing_cost,
         )
 
+    def _stamp_trade_symbols(self, trades: list[TradeRecord], metadata_map: dict | None, pool_map: dict | None) -> None:
+        for trade in trades or []:
+            if trade.token_symbol and trade.token_symbol != "未知":
+                continue
+            meta = (metadata_map or {}).get(trade.token_address)
+            if meta is not None and getattr(meta, "symbol", ""):
+                trade.token_symbol = meta.symbol
+                trade.token_name = meta.name or meta.symbol
+                continue
+            for pair in (pool_map or {}).get(trade.token_address) or []:
+                if getattr(pair, "base_address", "") == trade.token_address and getattr(pair, "base_symbol", ""):
+                    trade.token_symbol = pair.base_symbol
+                    trade.token_name = pair.base_symbol
+                    break
+
     def _progress(self, stage: str, message: str, done: int, total: int, wallet: str, token: str) -> None:
-        logger.info("%s", message)
+        if stage not in {"first_buy", "token"}:
+            logger.info("%s", message)
         if self.on_progress:
             with self._progress_lock:
                 self.on_progress(

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from app.domain.enums import EventType, FieldStatus
 from app.domain.fingerprint import activity_fingerprint
 from app.domain.models import TradeRecord
 from app.providers.moralis.models import WalletSwap
 from app.providers.solana.transaction_parser import WSOL_MINT
+from app.utils.money import to_decimal
 
 
 def swap_to_trade(swap: WalletSwap, chain: str = "sol") -> TradeRecord:
@@ -34,6 +37,16 @@ def swap_to_trade(swap: WalletSwap, chain: str = "sol") -> TradeRecord:
         if token.amount:
             token.usd_price = cost_usd / abs(token.amount)
     raw = dict(swap.raw or {})
+    usd_from_sol = bool(raw.get("_usd_from_sol"))
+    gas_sol = _fee_as_sol(raw.get("_fee_sol") or raw.get("fee"))
+    sol_usd = to_decimal(raw.get("_sol_usd"))
+    gas_usd = gas_sol * sol_usd if gas_sol is not None and sol_usd not in (None, 0) else None
+    if usd_from_sol and cost_usd is not None:
+        cost_status = FieldStatus.ESTIMATED
+    elif cost_usd is not None:
+        cost_status = FieldStatus.KNOWN
+    else:
+        cost_status = FieldStatus.UNRESOLVED
     trade = TradeRecord(
         wallet_address=swap.wallet_address,
         chain=chain,
@@ -47,8 +60,8 @@ def swap_to_trade(swap: WalletSwap, chain: str = "sol") -> TradeRecord:
         price_usd=token.usd_price,
         cost_usd=cost_usd,
         cost_sol=cost_sol,
-        gas_usd=None,
-        gas_sol=None,
+        gas_usd=gas_usd,
+        gas_sol=gas_sol,
         launchpad_platform=None,
         raw=raw,
         quote_symbol=quote.symbol,
@@ -56,10 +69,11 @@ def swap_to_trade(swap: WalletSwap, chain: str = "sol") -> TradeRecord:
         actual_quote_asset=quote.symbol or quote.address or None,
         actual_quote_amount=quote.amount,
         amount_status=FieldStatus.KNOWN if token.amount is not None else FieldStatus.UNRESOLVED,
-        cost_usd_status=FieldStatus.KNOWN if cost_usd is not None else FieldStatus.UNRESOLVED,
+        cost_usd_status=cost_status,
         cost_sol_status=FieldStatus.KNOWN if cost_sol is not None else FieldStatus.NOT_APPLICABLE,
-        gas_usd_status=FieldStatus.UNRESOLVED,
-        gas_sol_status=FieldStatus.UNRESOLVED,
+        gas_usd_status=FieldStatus.ESTIMATED if gas_usd is not None else FieldStatus.UNRESOLVED,
+        gas_sol_status=FieldStatus.KNOWN if gas_sol is not None else FieldStatus.UNRESOLVED,
+        cost_usd_estimated=usd_from_sol,
     )
     trade.activity_fingerprint = activity_fingerprint(
         chain,
@@ -75,3 +89,13 @@ def swap_to_trade(swap: WalletSwap, chain: str = "sol") -> TradeRecord:
         },
     )
     return trade
+
+
+def _fee_as_sol(value) -> Decimal | None:
+    fee = to_decimal(value)
+    if fee is None:
+        return None
+    fee = abs(fee)
+    if fee >= 1:
+        return fee / Decimal("1000000000")
+    return fee

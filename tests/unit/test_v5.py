@@ -334,6 +334,119 @@ class MoralisOptionalTests(unittest.TestCase):
         self.assertGreater(gmgn.limiter.cooldown_until, 0)
         self.assertEqual(helius.limiter.cooldown_until, 0)
 
+    def test_sol_quote_gets_estimated_usd_and_gas(self):
+        from decimal import Decimal
+
+        from app.providers.helius.models import BalanceChange, HistoryTx
+        from app.providers.helius.parsers import history_to_swaps
+        from app.providers.moralis.convert import swap_to_trade
+        from app.providers.solana.rpc_client import TX_READ_OPTIONS
+
+        tx = HistoryTx(
+            signature="sigBuy",
+            timestamp=1,
+            fee_sol=Decimal("0.000005"),
+            balance_changes=[
+                BalanceChange(mint="MintAAAA", amount=Decimal("100")),
+                BalanceChange(mint="SOL", amount=Decimal("-0.5")),
+            ],
+        )
+        swaps = history_to_swaps("WalletX", [tx], sol_usd=Decimal("150"))
+        self.assertEqual(len(swaps), 1)
+        self.assertEqual(swaps[0].total_value_usd, Decimal("75"))
+        trade = swap_to_trade(swaps[0])
+        self.assertEqual(trade.cost_usd, Decimal("75"))
+        self.assertTrue(trade.cost_usd_estimated)
+        self.assertEqual(trade.gas_sol, Decimal("0.000005"))
+        self.assertEqual(trade.gas_usd, Decimal("0.000005") * Decimal("150"))
+        self.assertEqual(TX_READ_OPTIONS["maxSupportedTransactionVersion"], 1)
+        from app.services.completeness_service import CompletenessService
+
+        row = CompletenessService().trade_export_row(trade, "Raydium")
+        self.assertIn("$75", str(row["USD金额"]))
+        self.assertIn("估", str(row["USD金额"]))
+        self.assertNotIn("无法验证", str(row["USD金额"]))
+        self.assertNotIn("GMGN 未提供", str(row["Gas USD"]))
+
+    def test_helius_history_preferred_over_rpc(self):
+        session = MagicMock()
+        calls = {"rpc": 0, "helius": 0}
+
+        def helius_request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            calls["helius"] += 1
+            items = [_hist_item("s1", 1000, "MintA" + "x" * 28, 1)]
+            payload = _history_payload(items, cursor=None, more=False)
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {}
+            resp.json.return_value = payload
+            resp.content = json_mod.dumps(payload).encode()
+            return resp
+
+        session.request.side_effect = helius_request
+        helius = HeliusProvider("k", session=session)
+        helius._shared_session = session
+        helius.cap_flags["WALLET_HISTORY"] = True
+        helius.probed = True
+        rpc_session = MagicMock()
+
+        def rpc_request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            calls["rpc"] += 1
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {}
+            payload = {"jsonrpc": "2.0", "result": [{"signature": "should-not-use", "blockTime": 1}]}
+            resp.json.return_value = payload
+            resp.content = json_mod.dumps(payload).encode()
+            return resp
+
+        rpc_session.request.side_effect = rpc_request
+        rpc = SolanaRpcProvider(session=rpc_session)
+        rpc._shared_session = rpc_session
+        orch = DataOrchestrator([helius, rpc, MoralisProvider("", enabled_flag=False)])
+        index = orch.collect_wallet_swaps("WalletX")
+        self.assertGreaterEqual(calls["helius"], 1)
+        self.assertEqual(calls["rpc"], 0)
+        self.assertEqual(index.provider, "helius")
+
+    def test_uuid_keys_are_moved_off_moralis(self):
+        from app.config import _rehome_helius_keys
+
+        moralis, helius = _rehome_helius_keys(
+            ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "eyJhbGciOi.jwt"],
+            [],
+        )
+        self.assertEqual(moralis, ["eyJhbGciOi.jwt"])
+        self.assertEqual(helius, ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"])
+
+    def test_from_config_runs_without_moralis(self):
+        from types import SimpleNamespace
+
+        cfg = SimpleNamespace(
+            enable_moralis=False,
+            moralis_api_keys=[],
+            moralis_api_key="",
+            moralis_base="https://solana-gateway.moralis.io",
+            solana_rpc_url="https://api.mainnet-beta.solana.com",
+            helius_api_key="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            helius_api_keys=[
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "11111111-2222-4333-8444-555555555555",
+            ],
+            helius_rpc_url="",
+            helius_target_rps=8,
+            helius_monthly_credit_budget=1_000_000,
+            enable_gmgn=True,
+            enable_gmgn_deep_history_fallback=False,
+            verification_mode="BALANCED",
+        )
+        orch = DataOrchestrator.from_config(cfg, None, None)
+        self.assertFalse(orch.provider("moralis").enabled)
+        helius = orch.provider("helius")
+        self.assertTrue(helius.enabled)
+        self.assertEqual(len(helius.api_keys), 2)
+        self.assertIn("helius-rpc.com", orch.provider("solana_rpc").rpc_url)
+
 
 class Gmgn429WithHeliusTests(unittest.TestCase):
     def test_gmgn_429_helius_ok(self):
@@ -463,6 +576,14 @@ class Gmgn429WithHeliusTests(unittest.TestCase):
         self.assertTrue(report.excel_path.endswith(".xlsx"))
         self.assertEqual(len(report.tokens), 1)
         self.assertEqual(report.tokens[0].first_buy_time.value, 102)
+        token = report.tokens[0]
+        self.assertIsNotNone(token.buy_total_usd)
+        self.assertIsNotNone(token.first_buy_display.value)
+        self.assertNotIn("无法验证", str(token.first_buy_display.export("usd")))
+        trades = [t for t in report.trades if t.token_address == "MintAAA"]
+        self.assertTrue(trades)
+        self.assertTrue(any(t.cost_usd is not None for t in trades))
+        self.assertTrue(any(t.token_symbol and t.token_symbol != "未知" for t in trades))
 
 
 if __name__ == "__main__":

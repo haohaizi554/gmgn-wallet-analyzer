@@ -12,6 +12,7 @@ from app.providers.solana.transaction_parser import VerifiedTransaction, WSOL_MI
 def resolve_first_buy(
     moralis_buy: Optional[WalletSwap],
     verified: Optional[VerifiedTransaction],
+    sol_usd: object | None = None,
 ) -> dict[str, ResolvedField]:
     fields: dict[str, ResolvedField] = {}
     if moralis_buy is None:
@@ -88,10 +89,29 @@ def resolve_first_buy(
                 sol_spent = abs(quote.amount)
             fields["first_buy_sol"] = resolved(sol_spent, ResolutionStatus.VERIFIED if verified.wallet_sol_delta is not None else ResolutionStatus.DIRECT, DataSource.SOLANA_RPC if verified.wallet_sol_delta is not None else src, field_name="first_buy_sol")
             if usd is not None:
-                fields["first_buy_usd"] = resolved(abs(usd), ResolutionStatus.DIRECT, src, field_name="first_buy_usd")
+                from_sol = bool((moralis_buy.raw or {}).get("_usd_from_sol"))
+                fields["first_buy_usd"] = resolved(
+                    abs(usd),
+                    ResolutionStatus.ESTIMATED if from_sol else ResolutionStatus.DIRECT,
+                    DataSource.LOCAL_CALCULATION if from_sol else src,
+                    note="SOL × 当前 SOL/USD 估算" if from_sol else "",
+                    estimated=from_sol,
+                    field_name="first_buy_usd",
+                )
             else:
-                fields["first_buy_usd"] = unresolved(src, "无法验证历史美元成本", "first_buy_usd")
-                fields["equivalent_sol_amount"] = unresolved(src, "无法验证SOL等值", "equivalent_sol_amount")
+                derived = _usd_from_sol(sol_spent, sol_usd)
+                if derived is not None:
+                    fields["first_buy_usd"] = resolved(
+                        derived,
+                        ResolutionStatus.ESTIMATED,
+                        DataSource.LOCAL_CALCULATION,
+                        note="SOL × 当前 SOL/USD 估算",
+                        estimated=True,
+                        field_name="first_buy_usd",
+                    )
+                else:
+                    fields["first_buy_usd"] = unresolved(src, "无法验证历史美元成本", "first_buy_usd")
+                    fields["equivalent_sol_amount"] = unresolved(src, "无法验证SOL等值", "equivalent_sol_amount")
         else:
             fields["first_buy_sol"] = not_applicable_field(DataSource.LOCAL_CALCULATION, "首买不是直接 SOL 成交", "first_buy_sol")
             if usd is not None:
@@ -108,8 +128,31 @@ def resolve_first_buy(
     if usd is not None:
         fields["first_buy_usd"] = resolved(abs(usd), ResolutionStatus.DIRECT, src, field_name="first_buy_usd")
     else:
-        fields["first_buy_usd"] = unresolved(src, "无法验证历史美元成本", "first_buy_usd")
+        quote = moralis_buy.sold
+        quote_sym = (quote.symbol or "").upper()
+        sol_spent = abs(quote.amount) if quote.amount is not None and (quote.address == WSOL_MINT or quote_sym in {"SOL", "WSOL"}) else None
+        derived = _usd_from_sol(sol_spent, sol_usd)
+        if derived is not None:
+            fields["first_buy_usd"] = resolved(
+                derived,
+                ResolutionStatus.ESTIMATED,
+                DataSource.LOCAL_CALCULATION,
+                note="SOL × 当前 SOL/USD 估算",
+                estimated=True,
+                field_name="first_buy_usd",
+            )
+        else:
+            fields["first_buy_usd"] = unresolved(src, "无法验证历史美元成本", "first_buy_usd")
     return fields
+
+
+def _usd_from_sol(sol_amount, sol_usd) -> Optional[Decimal]:
+    if sol_amount in (None, 0) or sol_usd in (None, 0):
+        return None
+    try:
+        return abs(Decimal(str(sol_amount))) * abs(Decimal(str(sol_usd)))
+    except Exception:
+        return None
 
 
 def transfer_in_first_buy_fields() -> dict[str, ResolvedField]:

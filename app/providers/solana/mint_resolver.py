@@ -34,6 +34,10 @@ class MintCreationFinder:
             return None
         signature = str(oldest.get("signature") or "")
         raw = self.rpc.get_transaction(signature) if signature else None
+        blob = str(raw or "").lower()
+        verified_init = any(hint.lower() in blob for hint in INIT_HINTS)
+        if not verified_init:
+            return None
         verified = parse_verified_transaction(raw, "", mint, signature)
         payload = {
             "mint": mint,
@@ -41,7 +45,7 @@ class MintCreationFinder:
             "creation_time": verified.block_time or oldest.get("blockTime"),
             "slot": verified.slot or oldest.get("slot"),
             "source": "solana_rpc",
-            "verified": bool(verified.found and verified.success),
+            "verified": True,
         }
         if self.cache:
             self.cache.set("solana_rpc", "TOKEN_CREATION", mint, payload, CREATION_TTL)
