@@ -130,9 +130,15 @@ def apply_fifo(trades: list[TradeRecord]) -> FifoResult:
             remaining_cost += lot.cost_usd
         else:
             remaining_known = False
+    if has_verified_sell:
+        realized_out = realized
+    elif missing_sells == 0:
+        realized_out = Decimal("0")
+    else:
+        realized_out = None
     return FifoResult(
         trades=ordered,
-        realized_profit=realized if has_verified_sell else None,
+        realized_profit=realized_out,
         missing_cost_count=missing_sells,
         missing_cost_sell_count=missing_sells,
         missing_cost_token_amount=missing_amount,

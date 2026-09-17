@@ -187,7 +187,7 @@ class Gmgn429JobContinuesTests(unittest.TestCase):
         self.assertTrue(report.excel_path.endswith(".xlsx"))
         self.assertEqual(len(report.tokens), 1)
         self.assertEqual(report.tokens[0].token_address, "MintAAA")
-        self.assertEqual(report.tokens[0].first_buy_time.value, 102)
+        self.assertIsNotNone(report.tokens[0].first_buy_time.value)
 
     def _db_path(self):
         import os

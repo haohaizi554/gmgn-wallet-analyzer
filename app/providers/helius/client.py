@@ -232,7 +232,13 @@ class HeliusProvider(HeliusWalletApi, HttpProviderMixin, DataProvider):
         pages = 0
         hit_known = False
         while pages < max_pages:
-            page, nxt, has_more = self.get_wallet_history_page(wallet, before=before, limit=100)
+            try:
+                page, nxt, has_more = self.get_wallet_history_page(wallet, before=before, limit=100)
+            except Exception as exc:
+                if txs:
+                    logger.warning("Helius history 后续分页失败，保留已采集 %s 笔: %s", len(txs), exc)
+                    return build_index(wallet, txs, source="helius_wallet_api", pages=pages, bottom_complete=False)
+                raise
             pages += 1
             self.history_pages += 1
             if not page:

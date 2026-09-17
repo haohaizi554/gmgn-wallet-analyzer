@@ -64,6 +64,58 @@ class EmptyExportTests(unittest.TestCase):
         self.assertNotIn(None, row.values())
         self.assertNotIn("", row.values())
 
+    def test_zero_sells_export_zero_not_unresolved(self):
+        acq = AcquisitionInfo(
+            acquisition_type=AcquisitionType.BUY,
+            timestamp=100,
+            price_usd=Decimal("1"),
+            amount=Decimal("1"),
+            cost_usd=Decimal("10"),
+            cost_sol=None,
+            gas_usd=None,
+            gas_sol=None,
+            market_cap=Decimal("1000"),
+            status=AcquisitionStatus.INFERRED,
+            reason="",
+            source="wallet_activity",
+        )
+        token = TokenAnalysisResult(
+            wallet_address="Wallet",
+            token_address="Mint",
+            chain="sol",
+            symbol="AA",
+            name="AA",
+            source_platform=known("Pump.fun", "dex"),
+            acquisition=acq,
+            created_at=known(50, "token_info.creation_timestamp"),
+            open_at=known(50, "dexscreener.pairCreatedAt", estimated=True),
+            pool_created_at=known(50, "dexscreener.pairCreatedAt"),
+            time_diff_seconds=known(50, "calc"),
+            buy_count=1,
+            buy_total_usd=Decimal("10"),
+            sell_count=0,
+            sell_total_usd=Decimal("0"),
+            realized_profit=known(Decimal("0"), "local_fifo", reason="无已实现卖出"),
+            unrealized_profit=known(Decimal("5"), "local_fifo", estimated=True),
+            total_profit=known(Decimal("5"), "local_fifo", estimated=True),
+            total_profit_pnl=known(Decimal("0.5"), "local_fifo", estimated=True),
+            fifo_realized_profit=known(Decimal("0"), "local_fifo"),
+            current_balance=Decimal("1"),
+            holding_duration_seconds=known(20, "calc"),
+            missing_cost_count=0,
+            status=TaskStatus.SUCCESS,
+            first_buy_display=known(Decimal("10"), "activity"),
+            first_buy_amount=known(Decimal("1"), "activity"),
+            first_buy_time=known(100, "activity"),
+            market_cap=known(Decimal("1000"), "activity", estimated=True),
+        )
+        row = CompletenessService().token_export_row(token)
+        self.assertEqual(row["卖出总额"], "$0.0000")
+        self.assertEqual(row["已实现盈亏"], "$0.0000")
+        self.assertNotIn("GMGN 利润接口", row["已实现盈亏"])
+        self.assertNotIn("无法验证卖出总额", row["卖出总额"])
+        self.assertNotEqual(row["开盘时间"], "GMGN 未提供")
+
 
 if __name__ == "__main__":
     unittest.main()

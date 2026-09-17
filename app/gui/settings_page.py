@@ -328,6 +328,22 @@ class SettingsPage(ctk.CTkFrame):
                 lines.append("DEX Screener：HEALTHY")
             except Exception as exc:
                 lines.append(f"DEX Screener：失败 {exc}")
+            try:
+                from app.providers.jupiter.client import JupiterProvider
+
+                j = JupiterProvider()
+                probed = j.test_connection()
+                lines.append("Jupiter：" + ("HEALTHY" if probed.get("ok") else "EMPTY"))
+            except Exception as exc:
+                lines.append(f"Jupiter：失败 {exc}")
+            try:
+                from app.providers.geckoterminal.client import GeckoTerminalProvider
+
+                g = GeckoTerminalProvider()
+                probed = g.test_connection()
+                lines.append("GeckoTerminal：" + ("HEALTHY" if probed.get("ok") else "EMPTY"))
+            except Exception as exc:
+                lines.append(f"GeckoTerminal：失败 {exc}")
             text = "\n".join(lines)
             self.after(0, lambda: self._sources_done(text))
 

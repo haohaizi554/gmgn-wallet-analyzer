@@ -12,6 +12,30 @@ def now_ts() -> int:
     return int(datetime.now().timestamp())
 
 
+def parse_timestamp(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return to_unix(value)
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        if number <= 0:
+            return None
+        return int(number)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.replace(".", "", 1).isdigit():
+            return parse_timestamp(float(text))
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return to_unix(dt)
+    except (TypeError, ValueError):
+        return None
+
+
 def to_unix(dt: datetime) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=LOCAL_TZ)

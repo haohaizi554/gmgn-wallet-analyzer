@@ -463,7 +463,13 @@ class Repositories:
             return None
         if int(rows[0]["expires_at"] or 0) < now_ts():
             return None
-        return json.loads(rows[0]["payload_json"])
+        raw = rows[0]["payload_json"]
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
 
     def save_provider_cache(self, provider: str, capability: str, key: str, payload: Any, ttl: int) -> None:
         now = now_ts()

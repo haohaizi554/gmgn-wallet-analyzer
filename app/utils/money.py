@@ -36,9 +36,15 @@ def format_usd(value: Optional[Decimal | float | int | str], estimated: bool = F
     parsed = to_decimal(value)
     if parsed is None:
         return "GMGN 未提供"
-    text = f"${parsed:,.4f}"
-    if estimated:
-        text += "（估）"
+    abs_value = abs(parsed)
+    sign = "-" if parsed < 0 else ""
+    if abs_value == 0:
+        text = "$0.0000"
+    elif abs_value < Decimal("0.01"):
+        body = f"{abs_value:.8f}".rstrip("0").rstrip(".")
+        text = f"{sign}${body}"
+    else:
+        text = f"{sign}${abs_value:,.4f}"
     return text
 
 
@@ -54,10 +60,13 @@ def format_usd_compact(value: Optional[Decimal | float | int | str], estimated: 
         text = f"{sign}${abs_value / Decimal('1000000'):.2f}M"
     elif abs_value >= Decimal("1000"):
         text = f"{sign}${abs_value / Decimal('1000'):.2f}K"
-    else:
+    elif abs_value >= Decimal("1"):
         text = f"{sign}${abs_value:,.2f}"
-    if estimated:
-        text += "（估）"
+    elif abs_value >= Decimal("0.0001"):
+        text = f"{sign}${abs_value:.4f}"
+    else:
+        body = f"{abs_value:.8f}".rstrip("0").rstrip(".")
+        text = f"{sign}${body or '0'}"
     return text
 
 
@@ -75,10 +84,7 @@ def format_percent(value: Optional[Decimal | float | int | str], estimated: bool
         return "GMGN 未提供"
     # GMGN total_profit_pnl / pnl 多为倍数：1.5 = +150%
     percent = parsed * Decimal("100")
-    text = f"{percent:.2f}%"
-    if estimated:
-        text += "（估）"
-    return text
+    return f"{percent:.2f}%"
 
 
 def sol_from_usd(cost_usd: Optional[Decimal], sol_usd: Optional[Decimal]) -> Optional[Decimal]:

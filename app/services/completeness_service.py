@@ -62,20 +62,26 @@ class CompletenessService:
             if holding.status == FieldStatus.KNOWN and holding.value is not None
             else holding.export("text")
         )
-        buy_total = safe_export_value(
-            token.buy_total_usd,
-            FieldStatus.ESTIMATED if getattr(token, "buy_total_estimated", False) and token.buy_total_usd is not None else FieldStatus.KNOWN if token.buy_total_usd is not None else FieldStatus.UNRESOLVED,
-            estimated=bool(getattr(token, "buy_total_estimated", False)),
-            kind="usd",
-            reason="无法验证买入总额",
-        )
-        sell_total = safe_export_value(
-            token.sell_total_usd,
-            FieldStatus.ESTIMATED if getattr(token, "sell_total_estimated", False) and token.sell_total_usd is not None else FieldStatus.KNOWN if token.sell_total_usd is not None else FieldStatus.UNRESOLVED,
-            estimated=bool(getattr(token, "sell_total_estimated", False)),
-            kind="usd",
-            reason="无法验证卖出总额",
-        )
+        if token.buy_count == 0:
+            buy_total = safe_export_value(Decimal("0"), FieldStatus.KNOWN, kind="usd")
+        else:
+            buy_total = safe_export_value(
+                token.buy_total_usd,
+                FieldStatus.ESTIMATED if getattr(token, "buy_total_estimated", False) and token.buy_total_usd is not None else FieldStatus.KNOWN if token.buy_total_usd is not None else FieldStatus.UNRESOLVED,
+                estimated=bool(getattr(token, "buy_total_estimated", False)),
+                kind="usd",
+                reason="无法验证买入总额",
+            )
+        if token.sell_count == 0:
+            sell_total = safe_export_value(Decimal("0"), FieldStatus.KNOWN, kind="usd")
+        else:
+            sell_total = safe_export_value(
+                token.sell_total_usd,
+                FieldStatus.ESTIMATED if getattr(token, "sell_total_estimated", False) and token.sell_total_usd is not None else FieldStatus.KNOWN if token.sell_total_usd is not None else FieldStatus.UNRESOLVED,
+                estimated=bool(getattr(token, "sell_total_estimated", False)),
+                kind="usd",
+                reason="无法验证卖出总额",
+            )
         row = {
             "#": 0,
             "币种": (token.symbol or "").strip() or "未知",

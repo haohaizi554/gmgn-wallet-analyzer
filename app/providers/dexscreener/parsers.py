@@ -25,6 +25,7 @@ class DexPair:
     market_cap: Optional[Decimal] = None
     pair_created_at: Optional[int] = None
     labels: list[str] = field(default_factory=list)
+    source: str = "dexscreener"
     raw: dict[str, Any] = field(default_factory=dict)
 
 

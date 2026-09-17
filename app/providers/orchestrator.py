@@ -8,14 +8,17 @@ from app.providers.base import DataProvider, ProviderMetrics, ProviderStatus
 from app.providers.cache import ProviderCache
 from app.providers.dexscreener.client import DexScreenerProvider
 from app.providers.exceptions import ProviderError, ProviderPlanError, ProviderRateLimitError
+from app.providers.geckoterminal.client import GeckoTerminalProvider
 from app.providers.gmgn.adapter import GMGNVerifierProvider
 from app.providers.helius.client import HeliusProvider, OFFICIAL_RPC
 from app.providers.helius.history import collect_rpc_fallback
 from app.providers.helius.parsers import history_to_swaps
+from app.providers.jupiter.client import JupiterProvider
 from app.providers.moralis.client import MoralisProvider
 from app.providers.moralis.models import TokenMetadata, TokenSwapIndex, WalletSwap, WalletSwapIndex
 from app.providers.history_cache import merge_history_state, merge_swaps, row_to_swap, swap_to_row
 from app.providers.priority import ProviderPriorityRegistry
+from app.providers.pumpfun.client import PumpFunProvider
 from app.providers.result import HistoryCoverage, coverage_from_swaps
 from app.providers.solana.rpc_client import SolanaRpcProvider
 from app.providers.solana.transaction_parser import parse_verified_transaction
@@ -111,6 +114,9 @@ class DataOrchestrator:
             )
         )
         providers.append(DexScreenerProvider(cache=cache))
+        providers.append(JupiterProvider(cache=cache))
+        providers.append(GeckoTerminalProvider(cache=cache))
+        providers.append(PumpFunProvider(cache=cache))
         enable_gmgn = bool(getattr(config, "enable_gmgn", True))
         deep = bool(getattr(config, "enable_gmgn_deep_history_fallback", False))
         gmgn = GMGNVerifierProvider(gmgn_client if enable_gmgn else None, deep_history=deep)
@@ -125,11 +131,6 @@ class DataOrchestrator:
         except KeyError:
             mode = VerificationMode.BALANCED
         orch = cls(providers, db=db, verification_mode=mode, cancel_event=cancel_event, on_health=on_health)
-        from app.providers.http import build_http_session
-
-        shared = build_http_session()
-        for item in orch.providers.values():
-            item._shared_session = shared
         helius = orch.providers.get("helius")
         rpc = orch.providers.get("solana_rpc")
         if using_helius_rpc and isinstance(helius, HeliusProvider) and helius.enabled and isinstance(rpc, SolanaRpcProvider):
@@ -144,6 +145,9 @@ class DataOrchestrator:
             [
                 GMGNVerifierProvider(client, deep_history=True),
                 DexScreenerProvider(),
+                JupiterProvider(),
+                GeckoTerminalProvider(),
+                PumpFunProvider(),
                 SolanaRpcProvider(),
                 MoralisProvider(api_key="", enabled_flag=False),
                 HeliusProvider(api_key=""),
@@ -241,15 +245,28 @@ class DataOrchestrator:
                     moralis.metrics.fallback_count += 1
                     logger.warning("moralis wallet swaps failed fallback=SOLANA_RPC: %s", exc)
 
-        helius_index = self._try_helius_wallet_history(
-            wallet,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            max_transactions=max_transactions,
-            as_fallback=bool(moralis_on or fallback_used),
-        )
+        helius_index = None
+        try:
+            helius_index = self._try_helius_wallet_history(
+                wallet,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                max_transactions=max_transactions,
+                as_fallback=bool(moralis_on or fallback_used),
+            )
+        except Exception as exc:
+            errors.append(str(exc))
+            fallback_used = True
+            fallback_name = "SOLANA_RPC"
+            logger.warning("Helius wallet history 未处理异常，fallback=SOLANA_RPC: %s", exc)
         if helius_index is not None:
-            return self._finish_index(helius_index, fallback_used=helius_index.fallback_used)
+            try:
+                return self._finish_index(helius_index, fallback_used=helius_index.fallback_used)
+            except Exception as exc:
+                errors.append(str(exc))
+                fallback_used = True
+                fallback_name = "SOLANA_RPC"
+                logger.warning("Helius index 收尾失败，fallback=SOLANA_RPC: %s", exc)
 
         if isinstance(rpc, SolanaRpcProvider):
             try:
@@ -282,7 +299,7 @@ class DataOrchestrator:
                     logger.info("RPC wallet history fallback wallet=%s tokens=%s", wallet[:8], len(index.by_token))
                     return self._finish_index(index, fallback_used=True)
                 errors.append("rpc_empty")
-            except ProviderError as exc:
+            except Exception as exc:
                 errors.append(str(exc))
                 logger.warning("RPC wallet history fallback 失败: %s", exc)
 
@@ -316,13 +333,21 @@ class DataOrchestrator:
         if self._sol_usd_loaded:
             return self._sol_usd
         self._sol_usd_loaded = True
-        dex = self.providers.get("dexscreener")
-        if isinstance(dex, DexScreenerProvider) and dex.enabled:
+        jup = self.providers.get("jupiter")
+        if isinstance(jup, JupiterProvider) and jup.enabled:
             try:
-                self._sol_usd = dex.get_sol_usd()
+                self._sol_usd = jup.get_sol_usd()
             except Exception as exc:
-                logger.warning("DEX SOL/USD 获取失败: %s", exc)
+                logger.warning("Jupiter SOL/USD 获取失败: %s", exc)
                 self._sol_usd = None
+        if self._sol_usd is None:
+            dex = self.providers.get("dexscreener")
+            if isinstance(dex, DexScreenerProvider) and dex.enabled:
+                try:
+                    self._sol_usd = dex.get_sol_usd()
+                except Exception as exc:
+                    logger.warning("DEX SOL/USD 获取失败: %s", exc)
+                    self._sol_usd = None
         return self._sol_usd
 
     def _try_helius_wallet_history(
@@ -400,6 +425,10 @@ class DataOrchestrator:
             return None
         except ProviderError as exc:
             logger.warning("Helius wallet history 失败: %s", exc)
+            helius.metrics.fallback_count += 1
+            return None
+        except Exception as exc:
+            logger.warning("Helius wallet history 解析失败，skip: %s", exc)
             helius.metrics.fallback_count += 1
             return None
 
@@ -528,16 +557,60 @@ class DataOrchestrator:
         return out
 
     def batch_pools(self, mints: list[str]) -> dict[str, list]:
+        grouped: dict[str, list] = {}
         dex = self.providers.get("dexscreener")
         if isinstance(dex, DexScreenerProvider) and dex.has_capability(ProviderCapability.TOKEN_POOLS):
             before = dex.metrics.request_count
             try:
                 grouped = dex.get_tokens_batch(mints)
                 self.dex_calls = dex.metrics.request_count - before
-                return grouped
             except ProviderError as exc:
                 logger.warning("DEX Screener batch 失败: %s", exc)
-        return {}
+        return self._enrich_pools(grouped, mints)
+
+    def token_pairs(self, mint: str) -> list:
+        pairs: list = []
+        dex = self.providers.get("dexscreener")
+        if isinstance(dex, DexScreenerProvider) and dex.has_capability(ProviderCapability.TOKEN_POOLS):
+            try:
+                pairs = dex.get_token_pairs(mint) or []
+            except ProviderError as exc:
+                logger.warning("DEX Screener pairs 失败 %s: %s", mint[:8], exc)
+        return self._enrich_pools({mint: pairs}, [mint]).get(mint, [])
+
+    def _enrich_pools(self, grouped: dict[str, list], mints: list[str]) -> dict[str, list]:
+        from app.providers.market_quotes import merge_quotes, pair_needs_fill
+
+        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+        if not need:
+            return grouped
+        jup = self.providers.get("jupiter")
+        if isinstance(jup, JupiterProvider) and jup.enabled and need:
+            try:
+                quotes = jup.get_token_quotes(need)
+                grouped = merge_quotes(grouped, quotes)
+                logger.info("jupiter 补齐行情 %s/%s", len(quotes), len(need))
+            except ProviderError as exc:
+                logger.warning("Jupiter quotes 失败: %s", exc)
+        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+        gecko = self.providers.get("geckoterminal")
+        if isinstance(gecko, GeckoTerminalProvider) and gecko.enabled and need:
+            try:
+                quotes = gecko.get_token_quotes(need)
+                grouped = merge_quotes(grouped, quotes)
+                logger.info("geckoterminal 补齐行情 %s/%s", len(quotes), len(need))
+            except ProviderError as exc:
+                logger.warning("GeckoTerminal quotes 失败: %s", exc)
+        need = [mint for mint in mints if pair_needs_fill(grouped.get(mint) or [], mint)]
+        pump = self.providers.get("pumpfun")
+        if isinstance(pump, PumpFunProvider) and pump.enabled and need:
+            try:
+                quotes = pump.get_token_quotes(need[:80])
+                grouped = merge_quotes(grouped, quotes)
+                logger.info("pump.fun 补齐行情 %s/%s", len(quotes), len(need))
+            except ProviderError as exc:
+                logger.warning("Pump.fun quotes 失败: %s", exc)
+        return grouped
 
     def verify_tx(self, wallet: str, mint: str, signature: str):
         helius = self.providers.get("helius")
@@ -603,9 +676,9 @@ class DataOrchestrator:
             return False
         if mode == VerificationMode.STRICT:
             return True
-        if kind in {"first_buy", "creation"}:
-            return True
         if mode == VerificationMode.FAST:
+            return False
+        if kind in {"first_buy", "creation"}:
             return False
         if kind == "transfer":
             return True

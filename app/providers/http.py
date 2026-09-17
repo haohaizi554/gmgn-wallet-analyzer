@@ -125,19 +125,49 @@ class HttpProviderMixin:
             owner.metrics.bytes += len(response.content or b"")
             status = response.status_code
             body: Any
+            decode_error = None
             try:
-                body = response.json() if response.content else {}
-            except json.JSONDecodeError:
-                body = response.text[:4000]
+                if status == 204:
+                    body = {}
+                else:
+                    body = _decode_response_body(response)
+            except ValueError as exc:
+                decode_error = exc
+                body = (getattr(response, "text", None) or "")[:400]
+            if decode_error is not None and status < 400:
+                owner.metrics.errors += 1
+                owner.metrics.network_error += 1
+                last_error = ProviderError(
+                    f"{owner.name} 无效 JSON HTTP {status}: {decode_error}",
+                    provider=owner.name,
+                    status=status,
+                    retryable=True,
+                    error_type=NETWORK_ERROR,
+                )
+                logger.info(
+                    "%s %s attempt=%s INVALID_JSON status=%s",
+                    owner.name,
+                    url.split("?")[0][-48:],
+                    attempt,
+                    status,
+                )
+                if attempt < policy.max_attempts:
+                    delay = _retry_delay(policy, attempt)
+                    logger.info("%s retry=%.2fs", owner.name, delay)
+                    _sleep(owner, delay)
+                    continue
+                owner.circuit.record_failure(None)
+                logger.warning("%s failed after %s attempts", owner.name, attempt)
+                raise last_error
             if status == 429:
                 owner.metrics.count_429 += 1
                 reset = _reset_seconds(response.headers, body)
                 owner.limiter.set_cooldown(reset)
-                owner.circuit.record_failure(429)
                 if attempt < policy.max_attempts and reset <= policy.max_rate_limit_wait:
                     logger.info("%s 429 Retry-After=%.2fs attempt=%s", owner.name, reset, attempt)
                     _sleep(owner, reset)
                     continue
+                owner.circuit.record_failure(429)
                 raise ProviderRateLimitError(f"{owner.name} 429", provider=owner.name, reset_at=int(reset), status=429)
             if status in policy.no_retry_statuses:
                 owner.metrics.errors += 1
@@ -185,6 +215,21 @@ class HttpProviderMixin:
         if last_error:
             raise last_error
         raise ProviderError(f"{owner.name} 请求失败", provider=owner.name)
+
+
+def _decode_response_body(response) -> Any:
+    content = getattr(response, "content", None)
+    if content in (None, b"", ""):
+        raise ValueError("Expecting value: empty body")
+    if isinstance(content, (bytes, bytearray)) and not bytes(content).strip():
+        raise ValueError("Expecting value: empty body")
+    try:
+        parsed = response.json()
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(str(exc) or "Expecting value") from exc
+    if parsed is None:
+        return {}
+    return parsed
 
 
 def _retry_delay(policy: ProviderRetryPolicy, attempt: int) -> float:

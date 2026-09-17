@@ -30,6 +30,7 @@ from app.domain.enums import (
     ReportPeriod,
     TaskStatus,
     TokenPositionStatus,
+    VerificationMode,
 )
 from app.domain.models import (
     AnalysisSummary,
@@ -515,28 +516,18 @@ class WalletAnalysisService:
             except (GMGNRateLimitError, ProviderRateLimitError) as exc:
                 logger.warning("GMGN token_info 限流，继续: %s", exc)
                 token_info = TokenInfo(token_address=token_address, chain=request.chain, symbol=symbol, name=symbol, info_status=FieldStatus.ERROR, info_error="GMGN限流，已使用其它数据源验证")
-        pairs = (pool_map or {}).get(token_address) or []
+        pairs = list((pool_map or {}).get(token_address) or [])
+        if not pairs and request.options.fetch_platform_pool and self.orchestrator is not None:
+            try:
+                extra = self.orchestrator.token_pairs(token_address)
+                if extra:
+                    pairs = list(extra)
+            except Exception as exc:
+                logger.warning("DexScreener token pairs 失败 %s: %s", token_address[:8], exc)
         if pairs:
             primary = select_primary_pool(pairs, token_address)
             if primary:
-                from app.domain.models import TokenPoolInfo
-
-                pool_info = TokenPoolInfo(
-                    token_address=token_address,
-                    pool_address=primary.pair_address,
-                    exchange=primary.dex_id,
-                    liquidity=primary.liquidity_usd,
-                    base_address=primary.base_address,
-                    quote_address=primary.quote_address,
-                    price=primary.price_usd,
-                    creation_timestamp=primary.pair_created_at,
-                    raw=primary.raw,
-                )
-        elif request.options.fetch_platform_pool:
-            try:
-                pool_info = self.enricher.get_pool_info(request.chain, token_address)
-            except (GMGNRateLimitError, ProviderRateLimitError) as exc:
-                logger.warning("GMGN pool_info 限流，继续: %s", exc)
+                pool_info = _pool_info_from_pair(token_address, primary)
 
         acq = resolve_acquisition(
             history,
@@ -578,8 +569,8 @@ class WalletAnalysisService:
 
         buys = [t for t in report_token_trades if t.event_type == EventType.BUY]
         sells = [t for t in report_token_trades if t.event_type == EventType.SELL]
-        buy_total = _sum_optional([t.cost_usd for t in buys])
-        sell_total = _sum_optional([t.cost_usd for t in sells])
+        buy_total = _sum_optional([t.cost_usd for t in buys]) if buys else Decimal("0")
+        sell_total = _sum_optional([t.cost_usd for t in sells]) if sells else Decimal("0")
         buy_total_estimated = bool(buys) and any(getattr(t, "cost_usd_estimated", False) for t in buys)
         sell_total_estimated = bool(sells) and any(getattr(t, "cost_usd_estimated", False) for t in sells)
         cost_est_any = any(getattr(t, "cost_usd_estimated", False) for t in history if t.cost_usd is not None)
@@ -607,6 +598,8 @@ class WalletAnalysisService:
             created = times["token_created_at"].to_audited()
         if times["pool_created_at"].value is not None:
             pool_created = times["pool_created_at"].to_audited()
+        if created.value is None and pool_info and pool_info.creation_timestamp:
+            created = known(int(pool_info.creation_timestamp), "dexscreener.pairCreatedAt", estimated=True, reason="用池创建时间近似代币创建时间")
         if created.value is None and self.orchestrator is not None and self.orchestrator.should_verify("creation"):
             try:
                 from app.providers.solana.mint_resolver import MintCreationFinder
@@ -623,8 +616,10 @@ class WalletAnalysisService:
                         )
             except Exception as exc:
                 logger.warning("Mint creation 查找失败: %s", exc)
-        if created.value is None and pool_info and pool_info.creation_timestamp:
-            created = known(int(pool_info.creation_timestamp), "dexscreener.pairCreatedAt", estimated=True, reason="用池创建时间近似代币创建时间")
+        if open_at.value is None and pool_created.value is not None:
+            open_at = known(pool_created.value, pool_created.source, estimated=True, reason="用池创建时间近似开盘时间")
+        elif open_at.value is None and created.value is not None:
+            open_at = known(created.value, created.source, estimated=True, reason="用创建时间近似开盘时间")
 
         if acq.acquisition_type == AcquisitionType.BUY:
             first_buy_trade = min(
@@ -645,7 +640,8 @@ class WalletAnalysisService:
             )
             first_amount = known(acq.amount, "wallet_activity.first_buy.token_amount") if acq.amount is not None else missing("wallet_activity", "无法验证")
             first_time = known(acq.timestamp, "wallet_activity.first_buy.timestamp") if acq.timestamp else missing("wallet_activity", "无法验证")
-            if moralis_buy and self.orchestrator is not None and self.orchestrator.should_verify("first_buy"):
+            missing_core = acq.cost_usd is None or not acq.timestamp
+            if moralis_buy and self.orchestrator is not None and (self.orchestrator.should_verify("first_buy") or missing_core):
                 try:
                     verified = self.orchestrator.verify_tx(request.wallet_address, token_address, moralis_buy.transaction_hash)
                     sol_usd = self.orchestrator.sol_usd_price() if self.orchestrator is not None else None
@@ -681,53 +677,41 @@ class WalletAnalysisService:
                     usd = moralis_buy.bought.usd_amount or moralis_buy.total_value_usd
                     if usd is not None and moralis_buy.bought.amount:
                         price = abs(usd) / abs(moralis_buy.bought.amount)
-            supply_now = token_info.total_supply if token_info else None
-            if supply_now is None and token_info and getattr(token_info, "circulating_supply", None):
-                supply_now = token_info.circulating_supply
-            if self.orchestrator is not None:
-                try:
-                    rpc_supply = self.orchestrator.token_supply(token_address)
-                    if rpc_supply is not None:
-                        supply_now = rpc_supply
-                except Exception:
-                    pass
-            if (supply_now is None or supply_now <= 0) and pool_info and pool_info.price not in (None, 0):
-                primary_for_supply = select_primary_pool(pairs, token_address) if pairs else None
-                mcap_now = getattr(primary_for_supply, "market_cap", None) if primary_for_supply else None
-                if mcap_now not in (None, 0):
-                    supply_now = mcap_now / pool_info.price
+            allow_rpc = bool(self.orchestrator and self.orchestrator.verification_mode == VerificationMode.STRICT)
+            supply_now = _resolve_supply(token_info, meta, pool_info, pairs, token_address, self.orchestrator if allow_rpc else None)
             entry = resolve_entry_market_cap(price, None, supply_now)
             market_cap = entry.to_audited()
 
         fifo_profit = (
-            known(fifo.realized_profit, "local_fifo", estimated=cost_est_any)
+            known(fifo.realized_profit, "local_fifo", estimated=cost_est_any, reason="无已实现卖出" if fifo.realized_profit == 0 and not fifo.missing_cost_count else "")
             if fifo.realized_profit is not None
             else not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "无已实现卖出")
         )
-        realized_profit = fifo_profit if fifo.realized_profit is not None else missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
+        realized_profit = fifo_profit
         current_price = None
         if pool_info and pool_info.price is not None:
             current_price = pool_info.price
         elif acq.price_usd is not None:
             current_price = acq.price_usd
-        if position_is_closed := (fifo.current_balance <= 0):
+        if fifo.current_balance <= 0:
             unrealized_profit = known(Decimal("0"), "local_fifo", reason="已清仓")
         elif current_price is not None and fifo.remaining_cost_usd is not None:
             unrl = current_price * fifo.current_balance - fifo.remaining_cost_usd
             unrealized_profit = known(unrl, "local_fifo", estimated=True, reason="当前价 × 余额 − 剩余成本")
         else:
-            unrealized_profit = missing("wallet_holdings", "未使用 holdings 接口，单 Token 未实现盈亏见 FIFO 余额")
-        total_value = None
-        if fifo.realized_profit is not None and unrealized_profit.value is not None:
-            total_value = fifo.realized_profit + Decimal(str(unrealized_profit.value))
+            unrealized_profit = missing("wallet_holdings", "当前价或剩余成本不足，无法估算未实现盈亏")
+        realized_value = to_decimal(realized_profit.value) if _audited_filled(realized_profit) else None
+        unrealized_value = to_decimal(unrealized_profit.value) if _audited_filled(unrealized_profit) else None
+        if realized_value is not None and unrealized_value is not None:
+            total_value = realized_value + unrealized_value
             total_profit = known(total_value, "local_fifo", estimated=unrealized_profit.estimated or cost_est_any)
             if buy_total not in (None, 0):
                 total_profit_pnl = known(total_value / buy_total, "local_fifo", estimated=True)
             else:
-                total_profit_pnl = missing("wallet_profits", "无买入总额，无法计算收益率")
+                total_profit_pnl = not_applicable("local_fifo", "无买入总额，无法计算收益率")
         else:
-            total_profit = missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
-            total_profit_pnl = missing("wallet_profits", "GMGN 利润接口不提供单 Token 拆分，见钱包汇总")
+            total_profit = not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "盈亏构成不完整")
+            total_profit_pnl = not_applicable("local_fifo", "无法验证历史成本" if fifo.missing_cost_count else "盈亏构成不完整")
         position = TokenPositionStatus.OPEN if fifo.current_balance > 0 else TokenPositionStatus.CLOSED
         status = TaskStatus.SUCCESS
         notes = []
@@ -798,7 +782,8 @@ class WalletAnalysisService:
             pnl_verify_status=fifo_profit.status.value,
         )
         official_balance = None
-        if self.orchestrator is not None:
+        strict_mode = bool(self.orchestrator and self.orchestrator.verification_mode == VerificationMode.STRICT)
+        if self.orchestrator is not None and strict_mode:
             try:
                 official_balance = self.orchestrator.official_balance(request.wallet_address, token_address)
             except Exception:
@@ -811,15 +796,20 @@ class WalletAnalysisService:
                 result.warnings = [*(result.warnings or []), "BALANCE_MISMATCH"]
         else:
             result.balance_verify_status = "DERIVED"
+        primary_pair = select_primary_pool(pairs, token_address) if pairs else None
         if meta is not None or pairs:
             from app.domain.enums import DataSource
 
             candidates = {}
             if meta is not None and meta.market_cap is not None:
                 candidates[DataSource.HELIUS if (meta.raw or {}).get("token_info") else DataSource.MORALIS] = meta.market_cap
-            primary_pair = select_primary_pool(pairs, token_address) if pairs else None
             if primary_pair and primary_pair.market_cap is not None:
-                candidates[DataSource.DEXSCREENER] = primary_pair.market_cap
+                src = {
+                    "jupiter": DataSource.JUPITER,
+                    "geckoterminal": DataSource.GECKOTERMINAL,
+                    "pumpfun": DataSource.PUMPFUN,
+                }.get(getattr(primary_pair, "source", "") or "", DataSource.DEXSCREENER)
+                candidates[src] = primary_pair.market_cap
             if candidates:
                 mcap_field = resolve_numeric_consensus("market_cap", candidates)
                 result.current_market_cap = mcap_field.to_audited()
@@ -829,10 +819,41 @@ class WalletAnalysisService:
             if meta is not None and meta.fully_diluted_value is not None:
                 fdv_cands[DataSource.MORALIS] = meta.fully_diluted_value
             if primary_pair and primary_pair.fdv is not None:
-                fdv_cands[DataSource.DEXSCREENER] = primary_pair.fdv
+                src = {
+                    "jupiter": DataSource.JUPITER,
+                    "geckoterminal": DataSource.GECKOTERMINAL,
+                    "pumpfun": DataSource.PUMPFUN,
+                }.get(getattr(primary_pair, "source", "") or "", DataSource.DEXSCREENER)
+                fdv_cands[src] = primary_pair.fdv
             if fdv_cands:
                 result.fdv = resolve_numeric_consensus("fdv", fdv_cands).to_audited()
-            result.audit_rows = _audit_rows(request.wallet_address, token_address, result, meta, primary_pair if pairs else None)
+            result.audit_rows = _audit_rows(request.wallet_address, token_address, result, meta, primary_pair)
+        if not _audited_filled(result.current_market_cap):
+            supply_now = _resolve_supply(token_info, meta, pool_info, pairs, token_address, None)
+            if current_price not in (None, 0) and supply_now not in (None, 0):
+                result.current_market_cap = known(
+                    current_price * supply_now,
+                    "price × supply",
+                    estimated=True,
+                    reason="Dex 未提供 marketCap，用现价 × 供给估算",
+                )
+            elif primary_pair and primary_pair.fdv not in (None, 0):
+                result.current_market_cap = known(
+                    primary_pair.fdv,
+                    "dexscreener.fdv",
+                    estimated=True,
+                    reason="Dex 未提供 marketCap，用 FDV 近似",
+                )
+        if not _audited_filled(result.fdv):
+            if primary_pair and primary_pair.fdv not in (None, 0):
+                result.fdv = known(primary_pair.fdv, "dexscreener.fdv", estimated=True)
+            elif _audited_filled(result.current_market_cap):
+                result.fdv = known(
+                    result.current_market_cap.value,
+                    result.current_market_cap.source,
+                    estimated=True,
+                    reason="用当前市值近似 FDV",
+                )
         self.completeness.apply_time_fields(result, fifo.last_sell_ts)
         if result.warnings == ["无"] and notes:
             result.warnings = notes
@@ -1008,6 +1029,56 @@ def _sum_optional(values: list[Optional[Decimal]]) -> Optional[Decimal]:
     if not present:
         return None
     return sum(present, Decimal("0"))
+
+
+def _audited_filled(value: AuditedValue) -> bool:
+    return value.value is not None and value.status in {
+        FieldStatus.KNOWN,
+        FieldStatus.VERIFIED,
+        FieldStatus.CONSENSUS,
+        FieldStatus.DIRECT,
+        FieldStatus.DERIVED,
+        FieldStatus.ESTIMATED,
+    }
+
+
+def _pool_info_from_pair(token_address: str, primary) -> TokenPoolInfo:
+    from app.domain.models import TokenPoolInfo
+
+    return TokenPoolInfo(
+        token_address=token_address,
+        pool_address=primary.pair_address,
+        exchange=primary.dex_id,
+        liquidity=primary.liquidity_usd,
+        base_address=primary.base_address,
+        quote_address=primary.quote_address,
+        price=primary.price_usd,
+        creation_timestamp=primary.pair_created_at,
+        raw=primary.raw,
+    )
+
+
+def _resolve_supply(token_info, meta, pool_info, pairs, token_address: str, orchestrator) -> Optional[Decimal]:
+    supply_now = token_info.total_supply if token_info else None
+    if (supply_now is None or supply_now <= 0) and token_info and getattr(token_info, "circulating_supply", None):
+        supply_now = token_info.circulating_supply
+    if (supply_now is None or supply_now <= 0) and meta is not None:
+        supply_now = getattr(meta, "total_supply_formatted", None) or getattr(meta, "total_supply", None)
+    if (supply_now is None or supply_now <= 0) and orchestrator is not None:
+        try:
+            rpc_supply = orchestrator.token_supply(token_address)
+            if rpc_supply is not None:
+                supply_now = rpc_supply
+        except Exception:
+            pass
+    if (supply_now is None or supply_now <= 0) and pool_info and pool_info.price not in (None, 0):
+        primary_for_supply = select_primary_pool(pairs, token_address) if pairs else None
+        mcap_now = None
+        if primary_for_supply is not None:
+            mcap_now = getattr(primary_for_supply, "market_cap", None) or getattr(primary_for_supply, "fdv", None)
+        if mcap_now not in (None, 0):
+            supply_now = mcap_now / pool_info.price
+    return supply_now
 
 
 def _token_info_from_metadata(meta: TokenMetadata, token_address: str, chain: str) -> TokenInfo:

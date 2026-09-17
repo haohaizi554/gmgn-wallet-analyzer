@@ -364,7 +364,7 @@ class MoralisOptionalTests(unittest.TestCase):
 
         row = CompletenessService().trade_export_row(trade, "Raydium")
         self.assertIn("$75", str(row["USD金额"]))
-        self.assertIn("估", str(row["USD金额"]))
+        self.assertNotIn("估", str(row["USD金额"]))
         self.assertNotIn("无法验证", str(row["USD金额"]))
         self.assertNotIn("GMGN 未提供", str(row["Gas USD"]))
 
@@ -408,6 +408,100 @@ class MoralisOptionalTests(unittest.TestCase):
         self.assertGreaterEqual(calls["helius"], 1)
         self.assertEqual(calls["rpc"], 0)
         self.assertEqual(index.provider, "helius")
+
+    def test_helius_invalid_json_falls_back_instead_of_aborting(self):
+        helius = HeliusProvider("k")
+        helius.enabled = True
+        helius.probed = True
+        helius.cap_flags["WALLET_HISTORY"] = True
+
+        def boom(*a, **k):
+            raise json_mod.JSONDecodeError("Expecting value", "doc", 0)
+
+        helius.collect_history = boom
+        rpc_session = MagicMock()
+
+        def rpc_request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {}
+            payload = {"jsonrpc": "2.0", "result": []}
+            resp.json.return_value = payload
+            resp.content = json_mod.dumps(payload).encode()
+            return resp
+
+        rpc_session.request.side_effect = rpc_request
+        rpc = SolanaRpcProvider(session=rpc_session)
+        rpc._shared_session = rpc_session
+        orch = DataOrchestrator([helius, rpc, MoralisProvider("", enabled_flag=False)])
+        index = orch.collect_wallet_swaps("WalletX")
+        self.assertIsNotNone(index)
+        self.assertNotEqual(getattr(index, "provider", ""), "helius")
+
+    def test_empty_http_json_is_retried(self):
+        from app.providers.http import HttpProviderMixin
+
+        session = MagicMock()
+        attempts = {"n": 0}
+
+        def request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            attempts["n"] += 1
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {}
+            resp.content = b""
+            resp.text = ""
+            resp.json.side_effect = json_mod.JSONDecodeError("Expecting value", "", 0)
+            return resp
+
+        session.request.side_effect = request
+        mixin = HttpProviderMixin()
+        mixin._shared_session = session
+        provider = HeliusProvider("k")
+        provider._shared_session = session
+        provider.retry_policy.max_attempts = 3
+        provider.retry_policy.base_delays = (0.0, 0.0, 0.0)
+        provider.retry_policy.jitter = 0
+        with self.assertRaises(ProviderError):
+            mixin.http_request("GET", "https://api.helius.xyz/v1/wallet/W/history", provider=provider)
+        self.assertEqual(attempts["n"], 3)
+
+    def test_429_retry_success_does_not_open_circuit(self):
+        from app.domain.enums import CircuitState
+        from app.providers.http import HttpProviderMixin
+
+        session = MagicMock()
+        attempts = {"n": 0}
+
+        def request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            attempts["n"] += 1
+            resp = MagicMock()
+            resp.headers = {"Retry-After": "1"}
+            if attempts["n"] == 1:
+                resp.status_code = 429
+                resp.json.return_value = {"error": "rate limited"}
+                resp.content = b'{"error":"rate limited"}'
+            else:
+                resp.status_code = 200
+                resp.json.return_value = {"ok": True}
+                resp.content = b'{"ok":true}'
+            return resp
+
+        session.request.side_effect = request
+        mixin = HttpProviderMixin()
+        mixin._shared_session = session
+        provider = HeliusProvider("k")
+        provider._shared_session = session
+        clock = FakeClock()
+        provider.circuit._clock = clock
+        provider.limiter = IndependentRateLimiter(rate=100, capacity=100, clock=clock, min_spacing=0)
+        provider.retry_policy.max_attempts = 3
+        provider.retry_policy.max_rate_limit_wait = 5
+        body = mixin.http_request("GET", "https://api.helius.xyz/v0/ok", provider=provider)
+        self.assertEqual(body, {"ok": True})
+        self.assertEqual(attempts["n"], 2)
+        self.assertEqual(provider.circuit.state, CircuitState.CLOSED)
+        self.assertEqual(provider.circuit.consecutive_failures, 0)
 
     def test_uuid_keys_are_moved_off_moralis(self):
         from app.config import _rehome_helius_keys
@@ -575,15 +669,124 @@ class Gmgn429WithHeliusTests(unittest.TestCase):
         self.assertIn(report.status, {TaskStatus.SUCCESS, TaskStatus.PARTIAL, TaskStatus.WARNING})
         self.assertTrue(report.excel_path.endswith(".xlsx"))
         self.assertEqual(len(report.tokens), 1)
-        self.assertEqual(report.tokens[0].first_buy_time.value, 102)
+        self.assertEqual(report.tokens[0].first_buy_time.value, 100)
         token = report.tokens[0]
         self.assertIsNotNone(token.buy_total_usd)
+        self.assertEqual(token.sell_total_usd, Decimal("0"))
+        self.assertEqual(token.realized_profit.value, Decimal("0"))
+        self.assertNotIn("GMGN 利润接口", str(token.realized_profit.export("usd")))
+        self.assertIsNotNone(token.open_at.value)
+        self.assertIsNotNone(token.current_market_cap.value)
         self.assertIsNotNone(token.first_buy_display.value)
         self.assertNotIn("无法验证", str(token.first_buy_display.export("usd")))
         trades = [t for t in report.trades if t.token_address == "MintAAA"]
         self.assertTrue(trades)
         self.assertTrue(any(t.cost_usd is not None for t in trades))
         self.assertTrue(any(t.token_symbol and t.token_symbol != "未知" for t in trades))
+
+
+class MoneyFormatTests(unittest.TestCase):
+    def test_tiny_usd_keeps_significant_digits(self):
+        from app.utils.money import format_percent, format_usd, format_usd_compact
+
+        self.assertIn("0.000012", format_usd(Decimal("0.00001234")))
+        self.assertNotEqual(format_usd(Decimal("0.00001234")), "$0.0000")
+        self.assertEqual(format_usd(Decimal("1.5")), "$1.5000")
+        self.assertNotEqual(format_usd_compact(Decimal("0.0004")), "$0.00")
+        self.assertNotIn("估", format_usd(Decimal("1.23"), estimated=True))
+        self.assertNotIn("估", format_usd_compact(Decimal("1500"), estimated=True))
+        self.assertNotIn("估", format_percent(Decimal("0.5"), estimated=True))
+
+
+class PublicMarketFallbackTests(unittest.TestCase):
+    def test_jupiter_quote_fills_mcap_and_pool_time(self):
+        from app.providers.jupiter.client import JupiterProvider, parse_token
+        from app.providers.market_quotes import merge_quotes, pair_needs_fill
+        from app.providers.orchestrator import DataOrchestrator
+        from app.utils.time_utils import parse_timestamp
+
+        quote = parse_token(
+            {
+                "id": "MintAAA",
+                "symbol": "AAA",
+                "name": "Alpha",
+                "usdPrice": "0.01",
+                "mcap": "1000000",
+                "fdv": "1100000",
+                "liquidity": "5000",
+                "circSupply": "100000000",
+                "firstPool": {"id": "pool1", "createdAt": "2026-08-01T00:00:00Z"},
+            }
+        )
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.market_cap, Decimal("1000000"))
+        self.assertEqual(quote.pair_created_at, parse_timestamp("2026-08-01T00:00:00Z"))
+        grouped = merge_quotes({}, [quote])
+        self.assertFalse(pair_needs_fill(grouped["MintAAA"], "MintAAA"))
+
+        session = MagicMock()
+
+        def request(method, url, params=None, json=None, headers=None, timeout=None, **kwargs):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.headers = {}
+            if "lite-api.jup.ag" in url:
+                payload = [
+                    {
+                        "id": "MintAAA",
+                        "symbol": "AAA",
+                        "usdPrice": "0.02",
+                        "mcap": "2000000",
+                        "fdv": "2000000",
+                        "liquidity": "8000",
+                        "firstPool": {"id": "jp1", "createdAt": "2026-08-01T00:00:00Z"},
+                    }
+                ]
+            else:
+                payload = []
+            resp.json.return_value = payload
+            resp.content = json_mod.dumps(payload).encode()
+            return resp
+
+        session.request.side_effect = request
+        jup = JupiterProvider(session=session)
+        jup._shared_session = session
+        dex = DexScreenerProvider(session=session)
+        dex._shared_session = session
+        orch = DataOrchestrator([dex, jup])
+        pools = orch.batch_pools(["MintAAA"])
+        self.assertEqual(pools["MintAAA"][0].market_cap, Decimal("2000000"))
+        self.assertEqual(pools["MintAAA"][0].source, "jupiter")
+
+    def test_geckoterminal_and_pumpfun_parsers(self):
+        from app.providers.geckoterminal.client import parse_token as parse_gt
+        from app.providers.pumpfun.client import parse_coin
+
+        gt = parse_gt(
+            {
+                "id": "solana_MintBBB",
+                "attributes": {
+                    "address": "MintBBB",
+                    "symbol": "BBB",
+                    "price_usd": "0.5",
+                    "market_cap_usd": "250000",
+                    "fdv_usd": "260000",
+                    "total_reserve_in_usd": "12000",
+                },
+            }
+        )
+        self.assertEqual(gt.mint, "MintBBB")
+        self.assertEqual(gt.market_cap, Decimal("250000"))
+        pump = parse_coin(
+            {
+                "mint": "MintCCC",
+                "symbol": "CCC",
+                "usd_market_cap": "12345.6",
+                "created_timestamp": 1722470400000,
+            }
+        )
+        self.assertEqual(pump.market_cap, Decimal("12345.6"))
+        self.assertEqual(pump.pair_created_at, 1722470400)
 
 
 if __name__ == "__main__":

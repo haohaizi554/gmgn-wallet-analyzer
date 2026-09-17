@@ -37,6 +37,13 @@ class FifoTests(unittest.TestCase):
         buy = next(x for x in result.trades if x.event_type == EventType.BUY)
         self.assertEqual(buy.single_pnl_display, "未实现")
 
+    def test_no_sells_realized_is_zero(self):
+        trades = [t(1, EventType.BUY, "10", "10")]
+        result = apply_fifo(trades)
+        self.assertEqual(result.realized_profit, Decimal("0"))
+        self.assertEqual(result.missing_cost_count, 0)
+        self.assertEqual(result.current_balance, Decimal("10"))
+
 
 if __name__ == "__main__":
     unittest.main()

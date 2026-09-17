@@ -80,13 +80,10 @@ def safe_export_value(
             return status_label(FieldStatus.API_MISSING, reason)
         return float(parsed)
     if isinstance(value, Decimal):
-        text = format(value.normalize(), "f")
-        return f"{text}（估）" if estimated else text
+        return format(value.normalize(), "f")
     text = str(value).strip()
     if not text:
         return reason or "无法验证"
-    if estimated and "（估）" not in text:
-        return f"{text}（估）"
     return text
 
 
