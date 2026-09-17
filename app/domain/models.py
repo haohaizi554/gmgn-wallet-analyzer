@@ -139,6 +139,10 @@ class TradeRecord:
     raw: dict[str, Any] = field(default_factory=dict)
     buy_cost_usd: Optional[Decimal] = None
     quote_symbol: Optional[str] = None
+    quote_mint: Optional[str] = None
+    actual_quote_asset: Optional[str] = None
+    actual_quote_amount: Optional[Decimal] = None
+    equivalent_sol_amount: Optional[Decimal] = None
     total_supply_at_trade: Optional[Decimal] = None
     amount_status: FieldStatus = FieldStatus.KNOWN
     cost_usd_status: FieldStatus = FieldStatus.API_MISSING
@@ -301,6 +305,19 @@ class TokenAnalysisResult:
     balance_authority: str = "DERIVED_FROM_ACTIVITY"
     missing_cost_sell_count: int = 0
     missing_cost_token_amount: Optional[Decimal] = None
+    current_market_cap: AuditedValue = field(default_factory=lambda: missing("market", "无法验证"))
+    fdv: AuditedValue = field(default_factory=lambda: missing("market", "无法验证"))
+    first_buy_verify_status: str = "UNRESOLVED"
+    first_buy_source: str = "无"
+    created_verify_status: str = "UNRESOLVED"
+    created_source: str = "无"
+    market_verify_status: str = "UNRESOLVED"
+    market_source: str = "无"
+    platform_verify_status: str = "UNRESOLVED"
+    platform_source: str = "无"
+    balance_verify_status: str = "UNRESOLVED"
+    pnl_verify_status: str = "UNRESOLVED"
+    audit_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -332,6 +349,16 @@ class CollectionScope:
     truncated_by_max: bool = False
     generated_at: str = ""
     version: str = ""
+    primary_history_provider: str = "无"
+    fallback_provider: str = "无"
+    coverage_complete: str = "否"
+    verified_empty: str = "否"
+    actual_coverage_start: str = "无"
+    actual_coverage_end: str = "无"
+    history_pages: int = 0
+    history_transactions: int = 0
+    fallback_used: str = "否"
+    coverage_reason: str = "无"
 
 
 @dataclass
@@ -369,3 +396,6 @@ class WalletReport:
     task_id: str = ""
     job_id: str = ""
     wallet_task_id: str = ""
+    provider_metrics: list[dict[str, Any]] = field(default_factory=list)
+    coverage: dict[str, Any] = field(default_factory=dict)
+    provider_health: list[dict[str, Any]] = field(default_factory=list)

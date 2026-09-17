@@ -164,7 +164,9 @@ class AnalysisPage(ctk.CTkFrame):
         self.job_summary = ctk.CTkLabel(header, text="钱包 0/0 · Token 0/0 · Keys - · 429 0 · 缓存 -", font=font(12), text_color=MUTED, anchor="w")
         self.job_summary.pack(fill="x", padx=16, pady=(2, 4))
         self.key_status = ctk.CTkLabel(header, text="API Keys：未加载", font=font(12), text_color=MUTED, anchor="w", justify="left")
-        self.key_status.pack(fill="x", padx=16, pady=(0, 8))
+        self.key_status.pack(fill="x", padx=16, pady=(0, 4))
+        self.source_status = ctk.CTkLabel(header, text="Data Sources：等待任务", font=font(12), text_color=MUTED, anchor="w", justify="left")
+        self.source_status.pack(fill="x", padx=16, pady=(0, 8))
         self.rate_banner = ctk.CTkLabel(header, text="", font=font(12), text_color=WARN, anchor="w")
         self.rate_banner.pack(fill="x", padx=16, pady=(0, 8))
 
@@ -322,10 +324,11 @@ class AnalysisPage(ctk.CTkFrame):
         if not wallets:
             messagebox.showerror("无法开始", "请输入有效 Solana 钱包地址")
             return
-        if not self.app.config.has_api_key:
-            messagebox.showerror("缺少 API Key", "请先在系统设置中填写 GMGN_API_KEY")
-            self.app.show_page("settings")
-            return
+        moralis_ready = bool(getattr(self.app.config, "enable_moralis", False) and getattr(self.app.config, "moralis_api_key", ""))
+        if not moralis_ready and not getattr(self.app.config, "helius_api_key", "") and not self.app.config.has_api_key:
+            self.app.log_panel.append("未配置 Moralis / Helius / GMGN。将使用 Solana 公共 RPC + DEX Screener。", "WARNING")
+        if not getattr(self.app.config, "helius_api_key", ""):
+            self.app.log_panel.append("Helius: NOT CONFIGURED (Optional)", "INFO")
         try:
             start = datetime.strptime(self.start_var.get().strip(), "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
             end = datetime.strptime(self.end_var.get().strip() + " 23:59:59", "%Y-%m-%d %H:%M:%S").replace(tzinfo=LOCAL_TZ)
@@ -430,11 +433,14 @@ class AnalysisPage(ctk.CTkFrame):
         elif kind == "KEY_RECOVERED":
             self.rate_banner.configure(text="Key 已恢复，任务继续")
             self.app.log_panel.append("Key 已恢复", "SUCCESS")
+        elif kind == "PROVIDER_HEALTH":
+            self.source_status.configure(text="Data Sources：" + (msg.get("message") or ""))
+            self._append_run_log(msg.get("message") or "")
         elif kind == "wallet_done":
             report: WalletReport = msg["report"]
             self.reports.append(report)
             self.render_report(report)
-            self.app.log_panel.append(f"SUCCESS {short_address(report.request.wallet_address)} 完成，Excel={report.excel_path}", "SUCCESS")
+            self.app.log_panel.append(f"{report.status.value} {short_address(report.request.wallet_address)} 完成，Excel={report.excel_path}", "SUCCESS" if report.status.value == "SUCCESS" else "WARNING")
         elif kind in ("done", "cancelled", "error"):
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
@@ -496,13 +502,13 @@ class AnalysisPage(ctk.CTkFrame):
                     "idx": idx,
                     "symbol": row["币种"],
                     "address": short_address(token.token_address),
-                    "platform": row["来源平台"],
+                    "platform": f"{row['来源平台']} [{token.platform_verify_status}]",
                     "acq": row["获得方式"],
-                    "mcap": row["入场市值"],
-                    "first_buy": row["首笔买入"],
+                    "mcap": f"{row['入场市值']} [{token.market_verify_status}]",
+                    "first_buy": f"{row['首笔买入']} [{token.first_buy_verify_status}]",
                     "amount": row["首买数量"],
-                    "buy_time": row["买入时间"],
-                    "created": row["创建时间"],
+                    "buy_time": f"{row['买入时间']} [{token.first_buy_verify_status}]",
+                    "created": f"{row['创建时间']} [{token.created_verify_status}]",
                     "diff": row["时差"],
                     "hold": row["持仓时长"],
                     "buys": row["买入笔数"],

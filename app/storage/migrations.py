@@ -26,6 +26,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     _migrate_history_meta(conn)
     _migrate_jobs(conn)
     _migrate_wallet_identity(conn)
+    _migrate_v4_provider_tables(conn)
+    _migrate_v5_helius_tables(conn)
+    _migrate_v52_history_events(conn)
     conn.commit()
 
 
@@ -174,3 +177,202 @@ def _migrate_wallet_identity(conn: sqlite3.Connection) -> None:
     if task_cols and "wallet_task_id" not in task_cols:
         conn.execute("ALTER TABLE task_runs ADD COLUMN wallet_task_id TEXT")
         conn.execute("UPDATE task_runs SET wallet_task_id = task_id WHERE wallet_task_id IS NULL OR wallet_task_id=''")
+
+
+def _migrate_v4_provider_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_cache (
+            cache_key TEXT PRIMARY KEY,
+            provider TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            wallet_address TEXT,
+            token_address TEXT,
+            field_name TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            raw_value TEXT,
+            normalized_value TEXT,
+            reference TEXT,
+            confidence REAL,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resolved_fields (
+            job_id TEXT NOT NULL,
+            wallet TEXT NOT NULL,
+            token TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            value TEXT,
+            status TEXT NOT NULL,
+            primary_source TEXT NOT NULL,
+            confidence REAL,
+            estimated INTEGER NOT NULL DEFAULT 0,
+            note TEXT,
+            PRIMARY KEY(job_id, wallet, token, field_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS token_metadata_cache (
+            mint TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS token_market_cache (
+            mint TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mint_creation_cache (
+            mint TEXT PRIMARY KEY,
+            creation_signature TEXT,
+            creation_time INTEGER,
+            slot INTEGER,
+            source TEXT,
+            verified INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT,
+            fetched_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pool_cache (
+            mint TEXT NOT NULL,
+            pair_address TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY(mint, pair_address)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS provider_metrics (
+            job_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(job_id, provider)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS verified_transactions (
+            signature TEXT PRIMARY KEY,
+            wallet_address TEXT,
+            token_address TEXT,
+            payload_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def _migrate_v5_helius_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS helius_capabilities (
+            provider TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            status TEXT NOT NULL,
+            checked_at INTEGER NOT NULL,
+            message TEXT,
+            PRIMARY KEY(provider, capability)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wallet_history_state (
+            wallet TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            bottom_complete INTEGER NOT NULL DEFAULT 0,
+            oldest_signature TEXT,
+            oldest_block_time INTEGER,
+            newest_signature TEXT,
+            newest_block_time INTEGER,
+            last_sync_at INTEGER NOT NULL,
+            PRIMARY KEY(wallet, provider)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS first_buy_cache (
+            wallet TEXT NOT NULL,
+            mint TEXT NOT NULL,
+            signature TEXT,
+            block_time INTEGER,
+            amount TEXT,
+            verified INTEGER NOT NULL DEFAULT 0,
+            source TEXT,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY(wallet, mint)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS helius_credit_usage (
+            month TEXT PRIMARY KEY,
+            estimated_credits INTEGER NOT NULL DEFAULT 0,
+            unpriced_requests INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def _migrate_v52_history_events(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wallet_history_events (
+            wallet TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            event_index INTEGER NOT NULL DEFAULT 0,
+            timestamp INTEGER,
+            event_type TEXT,
+            mint TEXT,
+            token_amount TEXT,
+            quote_mint TEXT,
+            quote_symbol TEXT,
+            quote_amount TEXT,
+            usd_amount TEXT,
+            usd_price TEXT,
+            provider TEXT NOT NULL,
+            fingerprint TEXT,
+            raw_reference TEXT,
+            payload_json TEXT,
+            PRIMARY KEY(wallet, signature, event_index, provider)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_wallet_history_events_wallet ON wallet_history_events(wallet, provider, timestamp)"
+    )

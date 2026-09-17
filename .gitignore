@@ -18,7 +18,7 @@ data/*.db-*
 data/raw/
 logs/
 output/
-*.xlsx
+*.pem
 .DS_Store
 Thumbs.db
 

@@ -137,6 +137,64 @@ CREATE TABLE IF NOT EXISTS wallet_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_trades_wallet_token ON trades(wallet_address, token_address, timestamp);
 CREATE INDEX IF NOT EXISTS idx_wallet_tasks_job ON wallet_tasks(job_id);
+CREATE TABLE IF NOT EXISTS provider_cache (
+    cache_key TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    wallet_address TEXT,
+    token_address TEXT,
+    field_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    raw_value TEXT,
+    normalized_value TEXT,
+    reference TEXT,
+    confidence REAL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS resolved_fields (
+    job_id TEXT NOT NULL,
+    wallet TEXT NOT NULL,
+    token TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    value TEXT,
+    status TEXT NOT NULL,
+    primary_source TEXT NOT NULL,
+    confidence REAL,
+    estimated INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    PRIMARY KEY(job_id, wallet, token, field_name)
+);
+CREATE TABLE IF NOT EXISTS mint_creation_cache (
+    mint TEXT PRIMARY KEY,
+    creation_signature TEXT,
+    creation_time INTEGER,
+    slot INTEGER,
+    source TEXT,
+    verified INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT,
+    fetched_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS provider_metrics (
+    job_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(job_id, provider)
+);
+CREATE TABLE IF NOT EXISTS verified_transactions (
+    signature TEXT PRIMARY KEY,
+    wallet_address TEXT,
+    token_address TEXT,
+    payload_json TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
 """
 
 

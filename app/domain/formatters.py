@@ -13,9 +13,15 @@ STATUS_TEXT = {
     FieldStatus.NOT_APPLICABLE: "不适用",
     FieldStatus.UNKNOWN: "未知",
     FieldStatus.API_MISSING: "GMGN 未提供",
+    FieldStatus.UNRESOLVED: "无法验证",
+    FieldStatus.CONFLICT: "数据源冲突",
     FieldStatus.ERROR: "接口暂不可用",
     FieldStatus.ESTIMATED: "估算值",
     FieldStatus.KNOWN: "已知",
+    FieldStatus.VERIFIED: "已链上验证",
+    FieldStatus.CONSENSUS: "多源一致",
+    FieldStatus.DIRECT: "直接取值",
+    FieldStatus.DERIVED: "已推导",
 }
 
 
@@ -39,14 +45,16 @@ def safe_export_value(
         FieldStatus.NOT_APPLICABLE,
         FieldStatus.UNKNOWN,
         FieldStatus.API_MISSING,
+        FieldStatus.UNRESOLVED,
+        FieldStatus.CONFLICT,
         FieldStatus.ERROR,
     ):
         text = status_label(resolved_status, reason)
-        return text if text else "未知"
+        return text if text else "无法验证"
 
     if value is None or value == "":
-        text = status_label(FieldStatus.API_MISSING, reason)
-        return text if text else "GMGN 未提供"
+        text = status_label(FieldStatus.UNRESOLVED, reason)
+        return text if text else "无法验证"
 
     if kind == "usd":
         return format_usd(value, estimated=estimated or resolved_status == FieldStatus.ESTIMATED)
@@ -76,7 +84,7 @@ def safe_export_value(
         return f"{text}（估）" if estimated else text
     text = str(value).strip()
     if not text:
-        return reason or "GMGN 未提供"
+        return reason or "无法验证"
     if estimated and "（估）" not in text:
         return f"{text}（估）"
     return text

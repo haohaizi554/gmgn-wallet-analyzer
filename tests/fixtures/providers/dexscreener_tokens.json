@@ -1,0 +1,28 @@
+[
+  {
+    "chainId": "solana",
+    "dexId": "raydium",
+    "pairAddress": "PoolAAA1111111111111111111111111111111111111",
+    "baseToken": {
+      "address": "MintAAA1111111111111111111111111111111111111",
+      "name": "Alpha",
+      "symbol": "AAA"
+    },
+    "quoteToken": {
+      "address": "So11111111111111111111111111111111111111112",
+      "name": "Wrapped SOL",
+      "symbol": "SOL"
+    },
+    "priceNative": "0.00005",
+    "priceUsd": "0.01",
+    "liquidity": {
+      "usd": 250000,
+      "base": 20000000,
+      "quote": 1000
+    },
+    "fdv": 1200000,
+    "marketCap": 1020000,
+    "pairCreatedAt": 200000,
+    "labels": []
+  }
+]

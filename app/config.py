@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -38,6 +38,19 @@ class AppConfig:
     rate_limit_max_retries: int
     export_combined: bool = True
     export_per_wallet: bool = True
+    moralis_api_key: str = ""
+    moralis_base: str = "https://solana-gateway.moralis.io"
+    helius_api_key: str = ""
+    helius_rpc_url: str = ""
+    solana_rpc_url: str = "https://api.mainnet-beta.solana.com"
+    verification_mode: str = "BALANCED"
+    enable_gmgn_deep_history_fallback: bool = False
+    enable_gmgn: bool = True
+    enable_moralis: bool = True
+    moralis_api_keys: list[str] = field(default_factory=list)
+    helius_target_rps: float = 8.0
+    helius_monthly_credit_budget: int = 1_000_000
+    helius_api_workers: int = 4
 
     @property
     def has_api_key(self) -> bool:
@@ -69,6 +82,27 @@ def _parse_keys(values: dict[str, str]) -> list[str]:
     return ordered
 
 
+def _parse_named_keys(values: dict[str, str], multi_key: str, single_key: str) -> list[str]:
+    multi = (values.get(multi_key) or "").strip()
+    keys: list[str] = []
+    if multi:
+        for part in multi.replace("\n", ",").split(","):
+            item = part.strip()
+            if item:
+                keys.append(item)
+    single = (values.get(single_key) or "").strip()
+    if single and single not in keys:
+        keys.insert(0, single)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
 def _read_env_file() -> dict[str, str]:
     ensure_runtime_dirs()
     load_dotenv(ENV_PATH, override=False)
@@ -79,6 +113,7 @@ def _read_env_file() -> dict[str, str]:
 def load_config() -> AppConfig:
     values = _read_env_file()
     keys = _parse_keys(values)
+    moralis_keys = _parse_named_keys(values, "MORALIS_API_KEYS", "MORALIS_API_KEY")
     api_base = (values.get("GMGN_API_BASE") or "https://openapi.gmgn.ai").rstrip("/")
     plan = (values.get("GMGN_PLAN") or "Free").strip() or "Free"
     rate = float(values.get("GMGN_KEY_RATE") or values.get("GMGN_RATE_LIMIT_RATE") or values.get("GMGN_RATE") or 5)
@@ -113,6 +148,19 @@ def load_config() -> AppConfig:
         rate_limit_max_retries=max(0, retries),
         export_combined=export_combined,
         export_per_wallet=export_per_wallet,
+        moralis_api_key=moralis_keys[0] if moralis_keys else "",
+        moralis_api_keys=moralis_keys,
+        moralis_base=(values.get("MORALIS_API_BASE") or "https://solana-gateway.moralis.io").rstrip("/"),
+        helius_api_key=(values.get("HELIUS_API_KEY") or "").strip(),
+        helius_rpc_url=(values.get("HELIUS_RPC_URL") or "").strip(),
+        solana_rpc_url=(values.get("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com").rstrip("/"),
+        verification_mode=(values.get("VERIFICATION_MODE") or "BALANCED").strip() or "BALANCED",
+        enable_gmgn_deep_history_fallback=_truthy(values.get("ENABLE_GMGN_DEEP_HISTORY_FALLBACK"), False),
+        enable_gmgn=_truthy(values.get("ENABLE_GMGN"), True),
+        enable_moralis=_truthy(values.get("ENABLE_MORALIS"), True),
+        helius_target_rps=float(values.get("HELIUS_TARGET_RPS") or 8),
+        helius_monthly_credit_budget=int(values.get("HELIUS_MONTHLY_CREDIT_BUDGET") or 1_000_000),
+        helius_api_workers=max(1, min(8, int(values.get("HELIUS_API_WORKERS") or 4))),
     )
 
 
@@ -128,6 +176,7 @@ def save_api_settings(
     initial_utilization: float = 0.60,
     reset_safety_margin: float = 3.0,
     shared_limit_detection: bool = True,
+    extra: dict[str, str] | None = None,
 ) -> None:
     ensure_runtime_dirs()
     if not ENV_PATH.exists():
@@ -156,6 +205,9 @@ def save_api_settings(
     set_key(str(ENV_PATH), "GMGN_RESET_SAFETY_MARGIN", str(float(reset_safety_margin)), quote_mode="never")
     set_key(str(ENV_PATH), "GMGN_SHARED_LIMIT_DETECTION", "true" if shared_limit_detection else "false", quote_mode="never")
     set_key(str(ENV_PATH), "GMGN_API_WORKERS", str(max(2, min(8, int(api_workers)))), quote_mode="never")
+    if extra:
+        for key, value in extra.items():
+            set_key(str(ENV_PATH), key, str(value), quote_mode="never")
     load_dotenv(ENV_PATH, override=True)
 
 

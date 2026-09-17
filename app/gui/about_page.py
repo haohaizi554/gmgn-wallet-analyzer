@@ -14,17 +14,18 @@ class AboutPage(ctk.CTkFrame):
         ctk.CTkLabel(card, text=APP_NAME, font=font(22, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=24, pady=(24, 8))
         text = (
             f"版本 {__version__}\n\n"
-            "本工具通过 GMGN OpenAPI 分析 Solana 钱包交易。\n"
+            "本工具是 Solana 钱包交易的多数据源可验证分析器。\n"
             "核心原则：准确、完整、可解释、可恢复、Excel 0 空字段。\n\n"
-            "数据来源：\n"
-            "- GET /v1/user/wallet_activity\n"
-            "- GET /v1/user/wallet_stats\n"
-            "- POST /v1/user/wallet_profits\n"
-            "- GET /v1/token/info\n"
-            "- GET /v1/token/pool_info\n\n"
+            "数据源：\n"
+            "- Moralis：默认主钱包 Swap 索引（可多 Key 轮换）\n"
+            "- Solana RPC：链上事实兜底与裁决（公共节点无需 Key）\n"
+            "- DEX Screener：池子 / 市值 / FDV（无需 Key）\n"
+            "- GMGN：辅助验证，不作为默认 history fallback\n"
+            "- Helius：可选增强，无 Key 时完全正常\n\n"
             "不使用 wallet_holdings（需要私钥签名）。\n"
-            "不把 symbol 当主键；所有关联使用 token_address。\n"
-            "首次买入按完整 cursor 历史中 timestamp 最小的 Buy。\n"
-            "GMGN 官方盈亏与本地 FIFO 分开保存。"
+            "不把 symbol 当主键；所有关联使用 (chain, mint)。\n"
+            "首次买入由链上 blockTime 最终裁决。\n"
+            "无法验证时输出明确语义，禁止用 0 伪装无数据。\n"
+            "官方盈亏与本地 FIFO 分开保存。"
         )
         ctk.CTkLabel(card, text=text, justify="left", anchor="nw", font=font(14), text_color=MUTED).pack(fill="both", expand=True, padx=24, pady=(0, 24))

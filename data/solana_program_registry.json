@@ -1,0 +1,17 @@
+{
+  "programs": [
+    {"id": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", "name": "Pump.fun", "kind": "launchpad"},
+    {"id": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA", "name": "Pump.fun", "kind": "amm"},
+    {"id": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", "name": "Raydium", "kind": "amm"},
+    {"id": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK", "name": "Raydium", "kind": "clmm"},
+    {"id": "CPMMoo8L3F4NbTegxTYohWHz5JHqtCuwwBAuBdmJYxpg", "name": "Raydium", "kind": "cpmm"},
+    {"id": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo", "name": "Meteora", "kind": "dlmm"},
+    {"id": "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB", "name": "Meteora", "kind": "amm"},
+    {"id": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc", "name": "Orca", "kind": "whirlpool"},
+    {"id": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj", "name": "LaunchLab", "kind": "launchpad"},
+    {"id": "MoonCVVNZFSYkqNXP6bxHLPL6QQJiMagDL3qcqUQTrG", "name": "Moonshot", "kind": "launchpad"},
+    {"id": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "name": "Token Program", "kind": "system"},
+    {"id": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "name": "Token-2022", "kind": "system"},
+    {"id": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s", "name": "Metaplex Token Metadata", "kind": "metadata"}
+  ]
+}

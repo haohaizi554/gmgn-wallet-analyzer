@@ -1,17 +1,17 @@
-# GMGN 钱包链上分析工具
+# GMGN 钱包分析工具 V5
 
-Windows 桌面程序：输入一个或多个 Solana 钱包地址，选择时间范围，通过 **GMGN OpenAPI** 拉取交易和 Token 数据，分析真正的首次买入、来源平台、时差、盈亏与 Gas，并导出 Excel / JSON。
+Windows 桌面程序：输入一个或多个 Solana 钱包地址，通过 **Helius Free + DEX Screener + 链上 RPC** 做可验证分析，GMGN / Moralis 仅为可选交叉验证。
 
-核心原则：**准确、完整、可解释、可恢复、Excel 0 空字段**。Token 主键永远是 `(chain, token_address)`，禁止用 symbol 关联。
+核心原则：**准确、完整、可解释、可恢复、Excel 0 空字段**。Token 主键永远是 `(chain, token_address)`。
 
 ## 1. 项目用途
 
-给运营/投研对照 GMGN 页面核对钱包：
+Solana Wallet Multi-Source Verifiable Analyzer：
 
 - 报告周期内涉及哪些 Token
-- 每个 Token 的**完整历史 First Buy**（不是周期内第一笔）
-- 无 Buy 时识别 TransferIn / Bridge / Wrapped / xStocks
-- GMGN 官方利润 + 本地 FIFO 对账（两套数字分开）
+- 每个 Token 的**完整历史 First Buy**（链上 blockTime / token delta 裁决）
+- 无 Buy 时识别 TransferIn / Bridge / Wrapped，禁止把转入写成 Buy
+- 本地 FIFO 为主；GMGN 利润仅作对照
 - 异常/缺失字段可审计
 
 ## 2. Python 版本
@@ -26,9 +26,14 @@ pip install -r requirements.txt
 
 ## 4. 申请 API Key
 
-1. 打开 [GMGN](https://gmgn.ai) 申请 OpenAPI Key。
-2. 本工具**只需要** `GMGN_API_KEY`。
-3. **不要**填写区块链钱包私钥。不调用 `wallet_holdings`。
+最低配置（默认免费路径）：
+
+1. [Helius](https://www.helius.dev/) Free API Key
+2. DEX Screener 无需 Key
+3. GMGN Key **可选**
+4. Moralis Key **可选，默认关闭**
+
+不要填写区块链钱包私钥。
 
 ## 5. .env 配置
 
@@ -36,26 +41,33 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-编辑 `.env`：
-
 ```
-GMGN_API_KEY=你的key
-GMGN_API_KEYS=key1,key2
-GMGN_API_BASE=https://openapi.gmgn.ai
-GMGN_PLAN=Free
-GMGN_RATE_LIMIT_RATE=5
-GMGN_RATE_LIMIT_CAPACITY=5
-GMGN_TARGET_UTILIZATION=0.80
-GMGN_API_WORKERS=4
+HELIUS_API_KEY=你的helius_key
+HELIUS_TARGET_RPS=8
+HELIUS_MONTHLY_CREDIT_BUDGET=1000000
+
+GMGN_API_KEYS=
+ENABLE_GMGN=true
+ENABLE_GMGN_DEEP_HISTORY_FALLBACK=false
+
+ENABLE_MORALIS=false
+MORALIS_API_KEY=
+MORALIS_API_KEYS=
+
+VERIFICATION_MODE=BALANCED
+SOLANA_RPC_URL=
 ```
 
-多把 Key 只用于故障切换（401/403），**全部共用一个全局加权令牌桶**。3 把 Free Key ≠ 15u/s，仍然是 5u/s × 80% ≈ 4 weighted units/s。也可在 GUI「系统设置」里填写并点「测试连接」。`.env` 已加入 `.gitignore`。
+有 `HELIUS_API_KEY` 时程序按官方格式生成 `https://mainnet.helius-rpc.com/?api-key=`，不必手填 RPC URL。`SOLANA_RPC_URL` 仅在你想覆盖时填写。
+
+Moralis 多把 Key 可在 GUI「系统设置」一行一把增删，并轮换。`.env` 已加入 `.gitignore`，禁止提交真实 Key。
 
 ## 6. 启动
 
 ```bat
 python main.py
 ```
+
 
 窗口约 1500×920，最小 1200×760。
 

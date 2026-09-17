@@ -35,7 +35,7 @@ class Sidebar(ctk.CTkFrame):
             )
             btn.pack(fill="x", padx=10, pady=3)
             self.buttons[key] = btn
-        ctk.CTkLabel(self, text="独立 Key 限流  ·  API First", font=font(11), text_color="#99F6E4").pack(side="bottom", pady=16)
+        ctk.CTkLabel(self, text="多数据源  ·  链上可验证", font=font(11), text_color="#99F6E4").pack(side="bottom", pady=16)
         self.highlight("analysis")
 
     def highlight(self, key: str) -> None:

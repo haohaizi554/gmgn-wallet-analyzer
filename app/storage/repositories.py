@@ -439,3 +439,268 @@ class Repositories:
             item["summary"] = json.loads(row["summary_json"]) if row["summary_json"] else {}
             result.append(item)
         return result
+
+    def get_provider_cache(self, key: str) -> Optional[Any]:
+        import json
+
+        rows = self.db.query(
+            "SELECT payload_json, expires_at FROM provider_cache WHERE cache_key=?",
+            (key,),
+        )
+        if not rows:
+            return None
+        if int(rows[0]["expires_at"] or 0) < now_ts():
+            return None
+        return json.loads(rows[0]["payload_json"])
+
+    def save_provider_cache(self, provider: str, capability: str, key: str, payload: Any, ttl: int) -> None:
+        now = now_ts()
+        expires = now + max(1, int(ttl))
+        if ttl >= 10 * 365 * 24 * 3600:
+            expires = now + ttl
+        self.db.execute(
+            """
+            INSERT INTO provider_cache(cache_key, provider, capability, payload_json, created_at, expires_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                payload_json=excluded.payload_json, created_at=excluded.created_at, expires_at=excluded.expires_at,
+                provider=excluded.provider, capability=excluded.capability
+            """,
+            (key, provider, capability, self.db.dumps(payload), now, expires),
+        )
+
+    def save_evidence(
+        self,
+        job_id: str,
+        wallet: str,
+        token: str,
+        field_name: str,
+        provider: str,
+        raw_value: Any,
+        normalized_value: Any,
+        reference: str,
+        confidence: float,
+    ) -> None:
+        self.db.execute(
+            """
+            INSERT INTO evidence(job_id, wallet_address, token_address, field_name, provider, raw_value, normalized_value, reference, confidence, created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                job_id,
+                wallet,
+                token,
+                field_name,
+                provider,
+                self.db.dumps(raw_value),
+                self.db.dumps(normalized_value),
+                reference,
+                confidence,
+                now_ts(),
+            ),
+        )
+
+    def save_resolved_field(
+        self,
+        job_id: str,
+        wallet: str,
+        token: str,
+        field_name: str,
+        value: Any,
+        status: str,
+        primary_source: str,
+        confidence: float,
+        estimated: bool,
+        note: str,
+    ) -> None:
+        self.db.execute(
+            """
+            INSERT INTO resolved_fields(job_id, wallet, token, field_name, value, status, primary_source, confidence, estimated, note)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id, wallet, token, field_name) DO UPDATE SET
+                value=excluded.value, status=excluded.status, primary_source=excluded.primary_source,
+                confidence=excluded.confidence, estimated=excluded.estimated, note=excluded.note
+            """,
+            (
+                job_id,
+                wallet,
+                token,
+                field_name,
+                self.db.dumps(value),
+                status,
+                primary_source,
+                confidence,
+                1 if estimated else 0,
+                note,
+            ),
+        )
+
+    def get_helius_capabilities(self, ttl: int = 3600) -> dict[str, str] | None:
+        rows = self.db.query("SELECT capability, status, checked_at FROM helius_capabilities WHERE provider=?", ("helius",))
+        if not rows:
+            return None
+        newest = max(int(r["checked_at"] or 0) for r in rows)
+        if newest and now_ts() - newest > ttl:
+            return None
+        return {str(r["capability"]): str(r["status"]) for r in rows}
+
+    def save_helius_capabilities(self, result: dict[str, str], message: str = "") -> None:
+        now = now_ts()
+        for name, status in result.items():
+            self.db.execute(
+                """
+                INSERT INTO helius_capabilities(provider, capability, status, checked_at, message)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(provider, capability) DO UPDATE SET
+                    status=excluded.status, checked_at=excluded.checked_at, message=excluded.message
+                """,
+                ("helius", name, status, now, message),
+            )
+
+    def get_wallet_history_state(self, wallet: str, provider: str = "helius") -> dict[str, Any] | None:
+        rows = self.db.query(
+            "SELECT * FROM wallet_history_state WHERE wallet=? AND provider=?",
+            (wallet, provider),
+        )
+        return dict(rows[0]) if rows else None
+
+    def save_wallet_history_state(
+        self,
+        wallet: str,
+        provider: str,
+        *,
+        bottom_complete: bool,
+        oldest_signature: str,
+        oldest_block_time: int,
+        newest_signature: str,
+        newest_block_time: int,
+    ) -> None:
+        self.db.execute(
+            """
+            INSERT INTO wallet_history_state(wallet, provider, bottom_complete, oldest_signature, oldest_block_time, newest_signature, newest_block_time, last_sync_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(wallet, provider) DO UPDATE SET
+                bottom_complete=excluded.bottom_complete,
+                oldest_signature=excluded.oldest_signature,
+                oldest_block_time=excluded.oldest_block_time,
+                newest_signature=excluded.newest_signature,
+                newest_block_time=excluded.newest_block_time,
+                last_sync_at=excluded.last_sync_at
+            """,
+            (
+                wallet,
+                provider,
+                1 if bottom_complete else 0,
+                oldest_signature,
+                oldest_block_time,
+                newest_signature,
+                newest_block_time,
+                now_ts(),
+            ),
+        )
+
+    def get_helius_credit_usage(self) -> dict[str, Any] | None:
+        import json
+        from datetime import datetime, timezone
+
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        rows = self.db.query("SELECT * FROM helius_credit_usage WHERE month=?", (month,))
+        if not rows:
+            return None
+        payload = json.loads(rows[0]["payload_json"] or "{}") if rows[0]["payload_json"] else {}
+        payload["estimated_credits"] = rows[0]["estimated_credits"]
+        payload["unpriced_requests"] = rows[0]["unpriced_requests"]
+        return payload
+
+    def save_helius_credit_usage(self, snapshot: dict[str, Any]) -> None:
+        from datetime import datetime, timezone
+
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        self.db.execute(
+            """
+            INSERT INTO helius_credit_usage(month, estimated_credits, unpriced_requests, payload_json, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(month) DO UPDATE SET
+                estimated_credits=excluded.estimated_credits,
+                unpriced_requests=excluded.unpriced_requests,
+                payload_json=excluded.payload_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                month,
+                int(snapshot.get("estimated_credits") or 0),
+                int(snapshot.get("unpriced_requests") or 0),
+                self.db.dumps(snapshot),
+                now_ts(),
+            ),
+        )
+
+    def load_wallet_history_events(self, wallet: str, provider: str) -> list[dict[str, Any]]:
+        try:
+            rows = self.db.query(
+                "SELECT * FROM wallet_history_events WHERE wallet=? AND provider=? ORDER BY timestamp DESC",
+                (wallet, provider),
+            )
+        except Exception:
+            return []
+        out = []
+        for row in rows:
+            item = dict(row)
+            raw = item.get("payload_json")
+            if raw:
+                try:
+                    import json
+
+                    payload = json.loads(raw)
+                    if isinstance(payload, dict):
+                        item["payload"] = payload
+                except Exception:
+                    item["payload"] = {}
+            out.append(item)
+        return out
+
+    def save_wallet_history_events(self, wallet: str, provider: str, events: list[dict[str, Any]]) -> None:
+        import json
+
+        for event in events:
+            payload = {k: v for k, v in event.items() if k.startswith("_") or k in {"event_type"}}
+            self.db.execute(
+                """
+                INSERT INTO wallet_history_events(
+                    wallet, signature, event_index, timestamp, event_type, mint, token_amount,
+                    quote_mint, quote_symbol, quote_amount, usd_amount, usd_price, provider,
+                    fingerprint, raw_reference, payload_json
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(wallet, signature, event_index, provider) DO UPDATE SET
+                    timestamp=excluded.timestamp,
+                    event_type=excluded.event_type,
+                    mint=excluded.mint,
+                    token_amount=excluded.token_amount,
+                    quote_mint=excluded.quote_mint,
+                    quote_symbol=excluded.quote_symbol,
+                    quote_amount=excluded.quote_amount,
+                    usd_amount=excluded.usd_amount,
+                    usd_price=excluded.usd_price,
+                    fingerprint=excluded.fingerprint,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    wallet,
+                    event.get("signature") or "",
+                    int(event.get("event_index") or 0),
+                    int(event.get("timestamp") or 0),
+                    event.get("event_type") or "",
+                    event.get("mint") or "",
+                    event.get("token_amount") or "",
+                    event.get("quote_mint") or "",
+                    event.get("quote_symbol") or "",
+                    event.get("quote_amount") or "",
+                    event.get("usd_amount") or "",
+                    event.get("usd_price") or "",
+                    provider,
+                    event.get("fingerprint") or "",
+                    event.get("raw_reference") or "",
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                ),
+            )

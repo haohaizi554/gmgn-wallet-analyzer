@@ -1,0 +1,65 @@
+{
+  "page": 1,
+  "pageSize": 2,
+  "cursor": "cursor-page-2",
+  "result": [
+    {
+      "transactionHash": "5MoralisBuySig1111111111111111111111111111111111111111111111",
+      "transactionIndex": 1,
+      "transactionType": "buy",
+      "blockNumber": 300000001,
+      "blockTimestamp": "2026-08-01T12:33:03.000Z",
+      "walletAddress": "9P9aAh3kdMK651Cc111111111111111111111111111",
+      "pairAddress": "PoolAAA1111111111111111111111111111111111111",
+      "pairLabel": "AAA/SOL",
+      "exchangeAddress": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+      "exchangeName": "Raydium",
+      "bought": {
+        "address": "MintAAA1111111111111111111111111111111111111",
+        "name": "Alpha",
+        "symbol": "AAA",
+        "amount": "1000",
+        "usdPrice": 0.01,
+        "usdAmount": 10
+      },
+      "sold": {
+        "address": "So11111111111111111111111111111111111111112",
+        "name": "Wrapped SOL",
+        "symbol": "SOL",
+        "amount": "0.05",
+        "usdPrice": 200,
+        "usdAmount": 10
+      },
+      "totalValueUsd": 10
+    },
+    {
+      "transactionHash": "5MoralisSellSig111111111111111111111111111111111111111111111",
+      "transactionIndex": 2,
+      "transactionType": "sell",
+      "blockNumber": 300000050,
+      "blockTimestamp": "2026-09-05T10:00:00.000Z",
+      "walletAddress": "9P9aAh3kdMK651Cc111111111111111111111111111",
+      "pairAddress": "PoolAAA1111111111111111111111111111111111111",
+      "pairLabel": "AAA/SOL",
+      "exchangeAddress": "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+      "exchangeName": "Raydium",
+      "bought": {
+        "address": "So11111111111111111111111111111111111111112",
+        "name": "Wrapped SOL",
+        "symbol": "SOL",
+        "amount": "0.08",
+        "usdPrice": 180,
+        "usdAmount": 14.4
+      },
+      "sold": {
+        "address": "MintAAA1111111111111111111111111111111111111",
+        "name": "Alpha",
+        "symbol": "AAA",
+        "amount": "500",
+        "usdPrice": 0.0288,
+        "usdAmount": 14.4
+      },
+      "totalValueUsd": 14.4
+    }
+  ]
+}

@@ -18,6 +18,7 @@ from app.domain.enums import TaskStatus
 from app.domain.models import WalletAnalysisRequest, WalletReport
 from app.jobs.event_bus import AnalysisEventBus
 from app.jobs.models import AnalysisJob, JobState, WalletTask
+from app.providers.orchestrator import DataOrchestrator
 from app.services.export_service import ExportService
 from app.services.wallet_analysis_service import WalletAnalysisService
 from app.storage.database import Database
@@ -156,6 +157,17 @@ class AnalysisJobEngine:
         client = self._make_client(job, cancel_event)
         scheduler = client.scheduler
         self.scheduler = scheduler
+
+        def on_health(rows) -> None:
+            text = "  |  ".join(
+                f"{r.name}: {r.health.value if hasattr(r.health, 'value') else r.health}" for r in rows
+            )
+            self._emit(job, {"type": "PROVIDER_HEALTH", "message": text, "providers": [
+                {"name": r.name, "health": r.health.value if hasattr(r.health, "value") else str(r.health), "detail": r.detail, "optional": r.optional}
+                for r in rows
+            ]})
+
+        orchestrator = DataOrchestrator.from_config(self.config, client, self.db, cancel_event, on_health=on_health)
         service = WalletAnalysisService(
             client=client,
             db=self.db,
@@ -164,6 +176,8 @@ class AnalysisJobEngine:
             token_ttl=self.config.token_info_ttl_seconds,
             pool_ttl=self.config.token_pool_ttl_seconds,
             token_workers=self.config.api_workers,
+            orchestrator=orchestrator,
+            deep_gmgn_history=bool(getattr(self.config, "enable_gmgn_deep_history_fallback", False)),
         )
         try:
             for request in job.requests:
@@ -225,7 +239,18 @@ class AnalysisJobEngine:
                 task.current_stage = "First Buy"
         self._emit(job, {"type": "progress", **payload})
 
-    def _guard_api(self, job: AnalysisJob, task: WalletTask, scheduler: CredentialScheduler, cancel_event: threading.Event) -> None:
+    def _guard_api(self, job: AnalysisJob, task: WalletTask, scheduler: CredentialScheduler, cancel_event: threading.Event, service: WalletAnalysisService | None = None) -> None:
+        orch = getattr(service, "orchestrator", None) if service else None
+        if orch is not None:
+            helius = orch.provider("helius")
+            if helius is not None and getattr(helius, "enabled", False):
+                return
+            moralis = orch.provider("moralis")
+            if moralis is not None and moralis.enabled:
+                return
+            rpc = orch.provider("solana_rpc")
+            if rpc is not None and getattr(rpc, "enabled", False):
+                return
         if scheduler.pool.has_healthy_now() and scheduler.safety.global_cooldown_until <= time.time():
             return
         task.state = JobState.WAITING_API
@@ -261,7 +286,7 @@ class AnalysisJobEngine:
         task = job.wallet_tasks[request.wallet_address]
         for _ in range(max_rounds):
             self._check(cancel_event)
-            self._guard_api(job, task, scheduler, cancel_event)
+            self._guard_api(job, task, scheduler, cancel_event, service)
             task.state = JobState.RUNNING
             task.started_at = task.started_at or time.time()
             self._emit(job, {"type": "WALLET_STARTED", "wallet": request.wallet_address, "wallet_task_id": request.wallet_task_id})

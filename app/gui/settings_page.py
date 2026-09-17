@@ -71,6 +71,52 @@ class SettingsPage(ctk.CTkFrame):
         self.status = ctk.CTkLabel(btns, text="", font=font(13), text_color=MUTED)
         self.status.pack(side="left", padx=8)
 
+        sources = ctk.CTkFrame(self, fg_color=PANEL)
+        sources.pack(fill="x", padx=24, pady=(0, 24))
+        ctk.CTkLabel(sources, text="数据源设置", font=font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(16, 4))
+        ctk.CTkLabel(
+            sources,
+            text="默认主路径：Moralis（主索引）+ Solana RPC（硬兜底）+ DEX Screener（市场）。GMGN 仅辅助验证。Helius 有 Key 才增强，没有完全正常。",
+            font=font(12),
+            text_color=MUTED,
+            anchor="w",
+            wraplength=900,
+        ).pack(fill="x", padx=20)
+        grid = ctk.CTkFrame(sources, fg_color="transparent")
+        grid.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(grid, text="Helius API Key", font=font(13), text_color=TEXT).grid(row=0, column=0, sticky="w", pady=6)
+        self.helius_var = ctk.StringVar(value=getattr(app.config, "helius_api_key", "") or "")
+        ctk.CTkEntry(grid, textvariable=self.helius_var, width=420, show="*").grid(row=0, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Helius 月度 Credit 预算（本地估算）", font=font(13), text_color=TEXT).grid(row=1, column=0, sticky="w", pady=6)
+        self.helius_budget_var = ctk.StringVar(value=str(int(getattr(app.config, "helius_monthly_credit_budget", 1_000_000) or 1_000_000)))
+        ctk.CTkEntry(grid, textvariable=self.helius_budget_var, width=160).grid(row=1, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Helius 目标 RPS", font=font(13), text_color=TEXT).grid(row=2, column=0, sticky="w", pady=6)
+        self.helius_rps_var = ctk.StringVar(value=str(getattr(app.config, "helius_target_rps", 8) or 8))
+        ctk.CTkEntry(grid, textvariable=self.helius_rps_var, width=160).grid(row=2, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Solana RPC URL（可选覆盖）", font=font(13), text_color=TEXT).grid(row=3, column=0, sticky="w", pady=6)
+        self.rpc_var = ctk.StringVar(value=getattr(app.config, "solana_rpc_url", "") or "")
+        ctk.CTkEntry(grid, textvariable=self.rpc_var, width=420).grid(row=3, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="有 Helius Key 时自动生成官方 RPC，不必手填。", font=font(11), text_color=MUTED).grid(row=4, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="验证模式", font=font(13), text_color=TEXT).grid(row=5, column=0, sticky="w", pady=6)
+        self.mode_var = ctk.StringVar(value=getattr(app.config, "verification_mode", "BALANCED") or "BALANCED")
+        ctk.CTkComboBox(grid, variable=self.mode_var, values=["FAST", "BALANCED", "STRICT"], width=160).grid(row=5, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="启用 Moralis（主索引）", font=font(13), text_color=TEXT).grid(row=6, column=0, sticky="w", pady=6)
+        self.enable_moralis_var = ctk.BooleanVar(value=bool(getattr(app.config, "enable_moralis", True)))
+        ctk.CTkCheckBox(grid, text="有 Key 时作为钱包 Swap 主索引", variable=self.enable_moralis_var).grid(row=6, column=1, sticky="w", padx=8)
+        ctk.CTkLabel(grid, text="Moralis Keys（一行一把，可增删）", font=font(13), text_color=TEXT).grid(row=7, column=0, sticky="nw", pady=6)
+        self.moralis_box = ctk.CTkTextbox(grid, width=420, height=70, font=font(13))
+        self.moralis_box.grid(row=7, column=1, sticky="w", padx=8)
+        existing_moralis = list(getattr(app.config, "moralis_api_keys", None) or [])
+        if not existing_moralis and getattr(app.config, "moralis_api_key", ""):
+            existing_moralis = [app.config.moralis_api_key]
+        if existing_moralis:
+            self.moralis_box.insert("1.0", "\n".join(existing_moralis))
+        src_btns = ctk.CTkFrame(sources, fg_color="transparent")
+        src_btns.pack(fill="x", padx=20, pady=(0, 16))
+        ctk.CTkButton(src_btns, text="测试数据源", width=120, command=self.test_sources).pack(side="left")
+        self.source_status = ctk.CTkLabel(src_btns, text="Moralis 主索引 · Solana RPC 兜底 · DEX 无需 Key · Helius 可选", font=font(12), text_color=MUTED)
+        self.source_status.pack(side="left", padx=10)
+
     def _util_label(self, value: float) -> str:
         if value <= 0.62:
             return "保守 60%"
@@ -85,6 +131,15 @@ class SettingsPage(ctk.CTkFrame):
         if "80" in text:
             return 0.80
         return 0.75
+
+    def _moralis_keys(self) -> list[str]:
+        text = self.moralis_box.get("1.0", "end")
+        keys = []
+        for line in text.replace(",", "\n").splitlines():
+            item = line.strip()
+            if item and item not in keys:
+                keys.append(item)
+        return keys
 
     def _keys(self) -> list[str]:
         text = self.keys_box.get("1.0", "end")
@@ -124,6 +179,18 @@ class SettingsPage(ctk.CTkFrame):
             api_keys=keys,
             target_utilization=self._util_value(),
             api_workers=int(self.workers_var.get() or 4),
+            extra={
+                "MORALIS_API_KEY": self._moralis_keys()[0] if self._moralis_keys() else "",
+                "MORALIS_API_KEYS": ",".join(self._moralis_keys()),
+                "ENABLE_MORALIS": "true" if self.enable_moralis_var.get() else "false",
+                "HELIUS_API_KEY": self.helius_var.get().strip(),
+                "HELIUS_TARGET_RPS": self.helius_rps_var.get().strip() or "8",
+                "HELIUS_MONTHLY_CREDIT_BUDGET": self.helius_budget_var.get().strip() or "1000000",
+                "SOLANA_RPC_URL": self.rpc_var.get().strip() or "https://api.mainnet-beta.solana.com",
+                "VERIFICATION_MODE": self.mode_var.get().strip() or "BALANCED",
+                "ENABLE_GMGN": "true",
+                "ENABLE_GMGN_DEEP_HISTORY_FALLBACK": "false",
+            },
         )
         self.app.reload_config()
         self.key_table.configure(text=self._key_status_text())
@@ -183,3 +250,68 @@ class SettingsPage(ctk.CTkFrame):
         self.status.configure(text="连接失败")
         self.app.set_api_status("API 异常")
         messagebox.showerror("测试连接失败", message)
+
+    def test_sources(self) -> None:
+        self.save()
+        self.source_status.configure(text="探测中（仅用户触发，不会在启动时打接口）…")
+
+        def work():
+            lines = []
+            try:
+                from app.providers.moralis.client import MoralisProvider
+
+                m = MoralisProvider(
+                    self.app.config.moralis_api_key,
+                    api_keys=list(getattr(self.app.config, "moralis_api_keys", None) or []),
+                    enabled_flag=bool(getattr(self.app.config, "enable_moralis", False)),
+                )
+                if m.enabled and m.api_key:
+                    m.test_connection()
+                    lines.append(f"Moralis：HEALTHY（{len(m.api_keys)} Key 轮换）")
+                elif m.api_key:
+                    lines.append("Moralis：DISABLED（已保存 Key，未启用）")
+                else:
+                    lines.append("Moralis：DISABLED / 未配置（可选）")
+            except Exception as exc:
+                lines.append(f"Moralis：失败 {exc}")
+            try:
+                from app.providers.solana.rpc_client import SolanaRpcProvider
+
+                r = SolanaRpcProvider(self.app.config.solana_rpc_url)
+                r.test_connection()
+                lines.append("Solana RPC：HEALTHY")
+            except Exception as exc:
+                lines.append(f"Solana RPC：失败 {exc}")
+            try:
+                from app.providers.helius.client import HeliusProvider
+
+                h = HeliusProvider(
+                    self.app.config.helius_api_key,
+                    target_rps=float(getattr(self.app.config, "helius_target_rps", 8) or 8),
+                    monthly_budget=int(getattr(self.app.config, "helius_monthly_credit_budget", 1_000_000) or 1_000_000),
+                )
+                if h.api_key:
+                    probed = h.probe_capabilities()
+                    lines.append("Helius：" + h.health_detail)
+                    for cap, status in probed.items():
+                        lines.append(f"  {cap}: {status}")
+                else:
+                    lines.append("Helius：NOT CONFIGURED (Optional)")
+            except Exception as exc:
+                lines.append(f"Helius：失败 {exc}")
+            try:
+                from app.providers.dexscreener.client import DexScreenerProvider
+
+                d = DexScreenerProvider()
+                d.test_connection()
+                lines.append("DEX Screener：HEALTHY")
+            except Exception as exc:
+                lines.append(f"DEX Screener：失败 {exc}")
+            text = "\n".join(lines)
+            self.after(0, lambda: self._sources_done(text))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sources_done(self, text: str) -> None:
+        self.source_status.configure(text=text.splitlines()[0] if text else "完成")
+        messagebox.showinfo("数据源探测", text)

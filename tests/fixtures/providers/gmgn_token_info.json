@@ -1,0 +1,18 @@
+{
+  "code": 0,
+  "data": {
+    "address": "MintAAA1111111111111111111111111111111111111",
+    "symbol": "AAA",
+    "name": "Alpha",
+    "creation_timestamp": 100,
+    "open_timestamp": 110,
+    "launchpad_platform": null,
+    "launchpad": null,
+    "total_supply": "100000000",
+    "pool": {
+      "exchange": "raydium",
+      "creation_timestamp": 200,
+      "pool_address": "PoolAAA1111111111111111111111111111111111111"
+    }
+  }
+}

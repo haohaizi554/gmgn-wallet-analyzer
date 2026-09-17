@@ -10,6 +10,17 @@ from app.utils.money import to_decimal
 from app.utils.time_utils import format_datetime, now_ts
 
 
+def _is_present(status: FieldStatus) -> bool:
+    return status in {
+        FieldStatus.KNOWN,
+        FieldStatus.VERIFIED,
+        FieldStatus.CONSENSUS,
+        FieldStatus.DIRECT,
+        FieldStatus.DERIVED,
+        FieldStatus.ESTIMATED,
+    }
+
+
 def assert_no_empty_export_cells(rows: Iterable[dict[str, Any]]) -> None:
     for index, row in enumerate(rows, start=1):
         for key, value in row.items():
@@ -96,10 +107,23 @@ class CompletenessService:
             "Launchpad": _audited_or_missing(token.launchpad_platform, "text"),
             "资产来源": _audited_or_missing(token.asset_source, "text"),
             "流动性平台": _audited_or_missing(token.liquidity_platform, "text"),
+            "当前市值": token.current_market_cap.export("usd_compact"),
+            "FDV": token.fdv.export("usd_compact"),
             "持仓状态": token.position_status.value,
             "状态": token.status.value,
             "钱包": token.wallet_address,
             "警告": "；".join(token.warnings) if token.warnings else "无",
+            "首买验证状态": token.first_buy_verify_status or "无",
+            "首买来源": token.first_buy_source or "无",
+            "创建时间验证状态": token.created_verify_status or "无",
+            "创建时间来源": token.created_source or "无",
+            "市值验证状态": token.market_verify_status or "无",
+            "市值来源": token.market_source or "无",
+            "平台验证状态": token.platform_verify_status or "无",
+            "平台来源": token.platform_source or "无",
+            "余额验证状态": token.balance_verify_status or "无",
+            "余额来源": token.balance_authority or "无",
+            "PnL验证状态": token.pnl_verify_status or "无",
         }
         assert_no_empty_export_cells([row])
         return row
@@ -153,7 +177,7 @@ class CompletenessService:
             ("总盈亏%", token.total_profit_pnl),
         ]
         for name, audited in fields:
-            if audited.status != FieldStatus.KNOWN or audited.estimated:
+            if not _is_present(audited.status) or audited.estimated:
                 records.append(
                     WarningRecord(
                         wallet_address=token.wallet_address,
@@ -198,7 +222,7 @@ class CompletenessService:
         return records
 
     def apply_time_fields(self, token: TokenAnalysisResult, last_sell_ts: int | None) -> None:
-        created = token.created_at.value if token.created_at.status == FieldStatus.KNOWN else None
+        created = token.created_at.value if _is_present(token.created_at.status) else None
         acq_ts = token.acquisition.timestamp
         if acq_ts and created:
             token.time_diff_seconds = AuditedValue(
@@ -222,3 +246,48 @@ class CompletenessService:
             seconds = now_ts() - acq_ts
             source = "now - first_acquisition"
         token.holding_duration_seconds = AuditedValue(seconds, source, FieldStatus.KNOWN)
+
+    def coverage_metrics(self, tokens: list[TokenAnalysisResult]) -> dict[str, Any]:
+        from app.domain.evidence import CoverageMetrics
+
+        metrics = CoverageMetrics()
+        for token in tokens:
+            fields = [
+                token.source_platform,
+                token.created_at,
+                token.first_buy_time,
+                token.first_buy_amount,
+                token.first_buy_display,
+                token.market_cap,
+                token.fifo_realized_profit,
+                token.current_market_cap,
+                token.fdv,
+            ]
+            for audited in fields:
+                metrics.total_fields += 1
+                st = audited.status
+                if st == FieldStatus.VERIFIED:
+                    metrics.verified_fields += 1
+                elif st == FieldStatus.CONSENSUS:
+                    metrics.consensus_fields += 1
+                elif st == FieldStatus.DIRECT:
+                    metrics.direct_fields += 1
+                elif st == FieldStatus.DERIVED:
+                    metrics.derived_fields += 1
+                elif st == FieldStatus.ESTIMATED or audited.estimated:
+                    metrics.estimated_fields += 1
+                elif st == FieldStatus.UNRESOLVED:
+                    metrics.unresolved_fields += 1
+                elif st == FieldStatus.CONFLICT:
+                    metrics.conflict_fields += 1
+                elif st == FieldStatus.NOT_APPLICABLE:
+                    metrics.not_applicable_fields += 1
+                elif st == FieldStatus.KNOWN:
+                    metrics.direct_fields += 1
+                else:
+                    metrics.unresolved_fields += 1
+        return metrics.to_dict()
+
+
+class CompletenessAuditor(CompletenessService):
+    """V4 名称别名。"""

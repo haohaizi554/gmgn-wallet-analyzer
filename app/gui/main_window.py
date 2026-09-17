@@ -91,10 +91,15 @@ class MainWindow(ctk.CTk):
         self.show_page("analysis")
         self.sidebar.highlight("analysis")
         self.after(80, self._poll_queue)
+        if getattr(self.config, "enable_moralis", False) and getattr(self.config, "moralis_api_keys", None):
+            self.log_panel.append(f"Moralis 主索引已启用，{len(self.config.moralis_api_keys)} 把 Key 轮换。")
+        elif getattr(self.config, "enable_moralis", False):
+            self.log_panel.append("ENABLE_MORALIS=true 但未配置 MORALIS_API_KEY，将走 Solana RPC。", "WARNING")
+        if not getattr(self.config, "helius_api_key", ""):
+            self.log_panel.append("Helius: NOT CONFIGURED (Optional)")
         if not self.config.has_api_key:
-            self.log_panel.append("未检测到 GMGN_API_KEY，请到系统设置填写。", "WARNING")
-        else:
-            self.log_panel.append("配置已加载，可以开始分析。")
+            self.log_panel.append("GMGN 未配置，仅作可选辅助。")
+        self.log_panel.append("配置已加载，可以开始分析。")
 
     def show_page(self, key: str) -> None:
         page = self.pages.get(key)

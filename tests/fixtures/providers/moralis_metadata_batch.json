@@ -1,0 +1,54 @@
+[
+  {
+    "mint": "So11111111111111111111111111111111111111112",
+    "standard": "native",
+    "name": "Wrapped SOL",
+    "symbol": "SOL",
+    "logo": null,
+    "decimals": "9",
+    "tokenStandard": 1,
+    "totalSupply": "0",
+    "totalSupplyFormatted": "0",
+    "fullyDilutedValue": "0",
+    "marketCap": "0",
+    "circulatingSupply": "0",
+    "metaplex": {
+      "metadataUri": "",
+      "masterEdition": false,
+      "isMutable": false,
+      "primarySaleHappened": 0,
+      "sellerFeeBasisPoints": 0,
+      "updateAuthority": ""
+    },
+    "links": {},
+    "description": "Native wrap",
+    "isVerifiedContract": true,
+    "possibleSpam": false
+  },
+  {
+    "mint": "MintAAA1111111111111111111111111111111111111",
+    "standard": "metaplex",
+    "name": "Alpha",
+    "symbol": "AAA",
+    "logo": null,
+    "decimals": "6",
+    "tokenStandard": 1,
+    "totalSupply": "100000000000000",
+    "totalSupplyFormatted": "100000000",
+    "fullyDilutedValue": "1000000",
+    "marketCap": "1000000",
+    "circulatingSupply": "100000000",
+    "metaplex": {
+      "metadataUri": "https://example.invalid/aaa.json",
+      "masterEdition": false,
+      "isMutable": true,
+      "primarySaleHappened": 1,
+      "sellerFeeBasisPoints": 0,
+      "updateAuthority": "Auth111111111111111111111111111111111111111"
+    },
+    "links": {},
+    "description": "test token",
+    "isVerifiedContract": false,
+    "possibleSpam": false
+  }
+]
